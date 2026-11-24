@@ -15,7 +15,8 @@ enum class CatCoatTheme : int {
     Shorthair = 2,
     OrangeWhite = 3,
     Meimei = 4,
-    Mumu = 5
+    Mumu = 5,
+    Didi = 6
 };
 
 enum class KeyboardTheme : int {
@@ -60,7 +61,7 @@ struct CatSettings {
         fullClickThrough = readDword(L"FullClickThrough", 0) != 0;
         alwaysOnTop      = readDword(L"AlwaysOnTop", 1) != 0;
         scale            = std::clamp((float)readDword(L"ScalePct", 100) / 100.0f, 0.5f, 2.0f);
-        coatTheme        = (CatCoatTheme)std::clamp((int)readDword(L"CoatTheme", 0), 0, 5);
+        coatTheme        = (CatCoatTheme)std::clamp((int)readDword(L"CoatTheme", 0), 0, 6);
         keyboardTheme    = (KeyboardTheme)std::clamp((int)readDword(L"KeyboardTheme", 0), 0, 2);
         eyeTheme         = (EyeColorTheme)std::clamp((int)readDword(L"EyeTheme", 0), 0, 5);
         DWORD hasPos     = readDword(L"HasPos", 0);

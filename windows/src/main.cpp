@@ -41,6 +41,7 @@ enum MenuCmd : UINT {
     CMD_COAT_ORANGE_WHITE,
     CMD_COAT_MEIMEI,
     CMD_COAT_MUMU,
+    CMD_COAT_DIDI,
     CMD_KB_MILK,
     CMD_KB_HACKER,
     CMD_KB_RETRO,
@@ -297,7 +298,8 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Shorthair ? MF_CHECKED : 0), CMD_COAT_SHORTHAIR, L"美短（银虎斑加白）");
     AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::OrangeWhite ? MF_CHECKED : 0), CMD_COAT_ORANGE_WHITE, L"橘白猫");
     AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Meimei ? MF_CHECKED : 0), CMD_COAT_MEIMEI, L"妹妹");
-    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Mumu ? MF_CHECKED : 0), CMD_COAT_MUMU, L"木木（英短蓝猫）");
+    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Mumu ? MF_CHECKED : 0), CMD_COAT_MUMU, L"木木");
+    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Didi ? MF_CHECKED : 0), CMD_COAT_DIDI, L"弟弟");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)coatMenu, L"\u732B\u54AA\u76AE\u80A4");
 
     // Keyboard Theme submenu
@@ -398,6 +400,11 @@ void showContextMenu(AppState& app, POINT screenPt) {
             app.settings.eyeTheme = EyeColorTheme::WarmAmber;
             app.settings.saveToRegistry();
             break;
+        case CMD_COAT_DIDI:
+            app.settings.coatTheme = CatCoatTheme::Didi;
+            app.settings.eyeTheme = EyeColorTheme::ReferenceHazel;
+            app.settings.saveToRegistry();
+            break;
         case CMD_EYE_SOFT_AMBER: app.settings.eyeTheme = EyeColorTheme::SoftAmber; app.settings.saveToRegistry(); break;
         case CMD_EYE_REFERENCE_HAZEL: app.settings.eyeTheme = EyeColorTheme::ReferenceHazel; app.settings.saveToRegistry(); break;
         case CMD_KB_MILK:   app.settings.keyboardTheme = KeyboardTheme::ClassicMilk; app.settings.saveToRegistry(); break;
@@ -469,7 +476,7 @@ void tickAndRender(AppState& app) {
                 (float)(cur.x - wr.left) / (float)w * CatPhysics::CanvasWidth,
                 (float)(cur.y - wr.top)  / (float)h * CatPhysics::CanvasHeight
             };
-            CatHitZone zone = CatRenderer::hitTest(cp, app.physics);
+            CatHitZone zone = CatRenderer::hitTest(cp, app.physics, app.settings.coatTheme);
             if (zone == CatHitZone::Head || zone == CatHitZone::Body) {
                 if (app.hasLastHover) {
                     float d = std::hypot(cp.x - app.lastHoverCanvas.x, cp.y - app.lastHoverCanvas.y);
