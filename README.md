@@ -28,7 +28,7 @@
   - **摸头/摸背互动**：鼠标轻撸猫头会露出惬意闭眼 `— —` 与微光粒子，闲置久了还会打瞌睡冒 `z`。
   - **智能鼠标穿透 & 开机自动启动**：透明区域自动穿透不挡操作；玩竞技游戏时可一键开启「完全鼠标穿透（游戏防误触）」，支持一键勾选「开机自动启动」（Windows 注册表 / macOS LaunchAgent / Linux XDG Autostart）。
 - **🎨 四款基础皮肤 & 多配色自由搭配**
-  - **猫咪皮肤**：经典小黑猫（原版荧光黄绿瞳）/ 挖煤暹罗猫（暖燕麦奶白 + 2.5D 焦糖面罩 + 巧克力小袜子 + 宝石蓝瞳）/ 美短（银虎斑加白 + 平顶白色额纹）/ 橘白猫（橘色头顶 + 白胸与白手套）；Windows 版另有参考 `pic/meimei.jpg` 绘制的「妹妹」银灰虎斑加白皮肤。
+  - **猫咪皮肤**：经典小黑猫（原版荧光黄绿瞳）/ 挖煤暹罗猫（暖燕麦奶白 + 2.5D 焦糖面罩 + 巧克力小袜子 + 宝石蓝瞳）/ 美短（银虎斑加白 + 平顶白色额纹）/ 橘白猫（橘色头顶 + 白胸与白手套）；Windows 版另有参考 `pic/meimei.jpg` 绘制的「妹妹」银灰虎斑加白皮肤，以及参考 `pic/mumu.jpg` 绘制的「木木」英短蓝猫皮肤（纯蓝灰被毛 + 圆脸浅色口鼻 + 金黄瞳）。
   - **键盘配色**：经典奶白暖黄 / 暗夜极客黑 / 复古奶油灰
   - **瞳色与缩放**：6 种瞳色、5 档尺寸缩放、今日击键与实时 KPM 统计。
 
@@ -64,7 +64,7 @@ open KuroCat.app
 
 ### 🪟 Windows (Windows 10 / 11 x64)
 1. 下载单文件 `KuroCat-Windows-x64.exe`（约 220 KB，**零外部运行时依赖**），双击即可运行，常驻右下角系统托盘。
-2. 右键小猫或左键/右键托盘小猫图标即可切换皮肤（含「妹妹」）、键盘配色、尺寸、**开机自动启动**、游戏防误触穿透模式等。
+2. 右键小猫或左键/右键托盘小猫图标即可切换皮肤（含「妹妹」「木木」）、键盘配色、尺寸、**开机自动启动**、游戏防误触穿透模式等。
 3. **开启「完全鼠标穿透」后，以下 4 种方式均可随时取消或呼出菜单**：
    - 全局快捷键：**`Ctrl + Alt + Shift + P`** 一键切换/取消穿透；
    - 临时解锁：按住 **`Alt`** 键，再直接右键小猫取消勾选或左键拖动；
@@ -82,6 +82,14 @@ build.bat
 cd windows
 cmake -B build && cmake --build build --config Release
 ```
+
+**在 Linux / macOS 上交叉编译出 Windows 版（无需 Windows 机器）：**
+```bash
+sudo apt install g++-mingw-w64-x86-64   # Debian / Ubuntu 安装 MinGW-w64 交叉工具链
+cd windows
+./build-cross.sh                        # 生成 windows/KuroCat.exe，内嵌 DPI manifest + 静态链接
+```
+> 仓库位于 VMware 共享文件夹（如 `/mnt/hgfs/...`）时，两边看到的是同一份文件：`build-cross.sh` 产出的 `KuroCat.exe` 会立即出现在 Windows 侧同一目录，直接双击即可测试；反之在 Windows 上跑 `build.bat`，Linux 侧也马上能看到结果。若需要 MSVC 特有的优化/ABI，仍需在 Windows 宿主机上执行 `build.bat`，或推送到 GitHub 由 Actions 编译。
 
 ### 🐧 Linux & 统信 UOS / 银河麒麟 (x86_64 & ARM64)
 支持 **Ubuntu 20.04+ / Debian 11+ / Deepin / 统信 UOS（x86_64 & ARM64 飞腾/鲲鹏）/ 银河麒麟 / Arch / Fedora**：
@@ -114,6 +122,9 @@ KuroCat/
 ├── Resources/                 # macOS Info.plist & AppIcon.icns
 ├── build.sh                   # macOS 一键通用二进制编译脚本
 ├── windows/                   # Windows 原生 C++17 (Win32 + GDI+ + Raw Input)
+│   ├── src/                   # KeyMap / InputEngine / CatPhysics / CatRenderer / main.cpp
+│   ├── build.bat              # Windows 本机 MSVC / MinGW 编译
+│   └── build-cross.sh         # Linux / macOS 上交叉编译 Windows 版 (MinGW-w64)
 ├── linux/                     # Linux & 统信 UOS 原生 C++17 (GTK3 + Cairo + XInput2 + evdev)
 │   ├── src/                   # KeyMap / InputEngine / CatPhysics / CatRenderer / main.cpp
 │   ├── build.sh               # 本地编译脚本

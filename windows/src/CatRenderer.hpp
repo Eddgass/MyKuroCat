@@ -100,14 +100,35 @@ private:
 
     static bool patterned(CatCoatTheme c) { return c == CatCoatTheme::Shorthair || c == CatCoatTheme::OrangeWhite || c == CatCoatTheme::Meimei; }
     static Gdiplus::Color rgb(unsigned int hex, BYTE a = 255) { return Gdiplus::Color(a, (hex >> 16) & 255, (hex >> 8) & 255, hex & 255); }
-    static Gdiplus::Color bodyColor(CatCoatTheme c) { return c == CatCoatTheme::Shorthair ? rgb(0xC2C5C1) : (c == CatCoatTheme::Meimei ? rgb(0xAEB4B5) : (c == CatCoatTheme::OrangeWhite ? rgb(0xF2EEE4) : catBlack())); }
+    static Gdiplus::Color bodyColor(CatCoatTheme c) {
+        switch (c) {
+            case CatCoatTheme::Shorthair:   return rgb(0xC2C5C1);
+            case CatCoatTheme::Meimei:      return rgb(0xAEB4B5);
+            case CatCoatTheme::Mumu:        return rgb(0x8C939B);
+            case CatCoatTheme::OrangeWhite: return rgb(0xF2EEE4);
+            default: return catBlack();
+        }
+    }
     static Gdiplus::Color limbColor(CatCoatTheme c) { return c == CatCoatTheme::OrangeWhite ? rgb(0xD8AA73) : bodyColor(c); }
-    static Gdiplus::Color pawColor(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? rgb(0xF8F7F2) : (patterned(c) ? rgb(0xF2EEE4) : (c == CatCoatTheme::Siamese ? siamesePoint() : catBlack())); }
+    static Gdiplus::Color pawColor(CatCoatTheme c) {
+        switch (c) {
+            case CatCoatTheme::Siamese:     return siamesePoint();
+            case CatCoatTheme::Meimei:      return rgb(0xF8F7F2);
+            case CatCoatTheme::Mumu:        return rgb(0x8C939B);
+            case CatCoatTheme::Shorthair:
+            case CatCoatTheme::OrangeWhite: return rgb(0xF2EEE4);
+            default: return catBlack();
+        }
+    }
     static Gdiplus::Color earTailColor(CatCoatTheme c) { return c == CatCoatTheme::Siamese ? siamesePoint() : limbColor(c); }
-    static Gdiplus::Color creaseColor(CatCoatTheme c, BYTE a = 255) { return patterned(c) ? rgb(c == CatCoatTheme::Meimei ? 0x646B6D : 0x8B8171, (BYTE)(a*0.60f)) : contourMint(a); }
-    static float headWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.12f : 1.0f; }
-    static float bodyWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.28f : 1.0f; }
-    static float bodyHeightScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.06f : 1.0f; }
+    static Gdiplus::Color creaseColor(CatCoatTheme c, BYTE a = 255) {
+        if (c == CatCoatTheme::Mumu) return rgb(0x555C64, (BYTE)(a * 0.78f));
+        if (patterned(c)) return rgb(c == CatCoatTheme::Meimei ? 0x646B6D : 0x8B8171, (BYTE)(a*0.60f));
+        return contourMint(a);
+    }
+    static float headWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.12f : (c == CatCoatTheme::Mumu ? 1.16f : 1.0f); }
+    static float bodyWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.28f : (c == CatCoatTheme::Mumu ? 1.22f : 1.0f); }
+    static float bodyHeightScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.06f : (c == CatCoatTheme::Mumu ? 1.06f : 1.0f); }
     static Gdiplus::PointF coatMarkPoint(CoatPoint p, bool headSurface, bool skull, CatCoatTheme coat, float seatX, float seatY, Pt head, const CatPhysics& physics) {
         if (headSurface) {
             float depth=coat==CatCoatTheme::OrangeWhite ? 29.6f*std::sqrt(std::max(0.0f,1-p.x*p.x/(46*46)-p.y*p.y/(40*40))) : 27.5f;
@@ -372,7 +393,7 @@ private:
         PointF c2(seatX + 66.0f + wag2 * 0.4f, seatY - 26.0f + wag1 * 0.7f + huntDrop);
         PointF tip(seatX + 91.0f + wag2 * 0.5f, seatY - 30.0f + wag1 * 0.85f + huntDrop);
 
-        Pen tailPen(earTailColor(coat), 11.0f);
+        Pen tailPen(earTailColor(coat), coat == CatCoatTheme::Mumu ? 13.0f : 11.0f);
         tailPen.SetStartCap(LineCapRound);
         tailPen.SetEndCap(LineCapRound);
         tailPen.SetLineJoin(LineJoinRound);
@@ -437,7 +458,7 @@ private:
 
         SolidBrush b(earTailColor(coat));
         g.FillPath(&b, &ear);
-        if (coat == CatCoatTheme::Meimei) {
+        if (coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Mumu) {
             PointF innerPts[3] = {
                 PointF(tip3D.x, tip3D.y + 8.0f),
                 PointF(innerBase.x + sign * 5.0f, innerBase.y + 4.0f),
@@ -445,7 +466,7 @@ private:
             };
             GraphicsPath innerEar;
             innerEar.AddPolygon(innerPts, 3);
-            SolidBrush innerBrush(rgb(0xB97E79, 205));
+            SolidBrush innerBrush(coat == CatCoatTheme::Meimei ? rgb(0xB97E79, 205) : rgb(0x9E8E92, 185));
             g.FillPath(&innerBrush, &innerEar);
         }
     }
@@ -590,14 +611,27 @@ private:
         float yawRad = physics.headYaw.value * 0.50f;
         float pitchRad = physics.headPitch.value * 0.36f;
 
+        if (coat == CatCoatTheme::Mumu) {
+            // Soft lighter muzzle so the round British Shorthair face reads on the solid blue fur.
+            Pt muzzle = projectHead3D(0.0f, 13.0f, 26.5f, yawRad, pitchRad);
+            GraphicsPath muzzlePath;
+            muzzlePath.AddEllipse(muzzle.x - 17.0f, muzzle.y - 12.0f, 34.0f, 24.0f);
+            PathGradientBrush muzzleBrush(&muzzlePath);
+            muzzleBrush.SetCenterColor(rgb(0xC4C9CD, 165));
+            Color edge[] = { rgb(0xB3B9BE, 0) };
+            int edgeCount = 1;
+            muzzleBrush.SetSurroundColors(edge, &edgeCount);
+            g.FillPath(&muzzleBrush, &muzzlePath);
+        }
         drawEye3D(g, true, yawRad, pitchRad, physics, eyeTheme, coat);
         drawEye3D(g, false, yawRad, pitchRad, physics, eyeTheme, coat);
-        if (coat == CatCoatTheme::Meimei) drawMeimeiNose(g, yawRad, pitchRad);
+        if (coat == CatCoatTheme::Meimei) drawCatNose(g, yawRad, pitchRad, 0xD88F91, 0x78615F);
+        else if (coat == CatCoatTheme::Mumu) drawCatNose(g, yawRad, pitchRad, 0x9C8B8F, 0x4E545B);
         drawWhiskers3D(g, yawRad, pitchRad, physics, coat);
         g.Restore(st);
     }
 
-    static void drawMeimeiNose(Gdiplus::Graphics& g, float yawRad, float pitchRad) {
+    static void drawCatNose(Gdiplus::Graphics& g, float yawRad, float pitchRad, unsigned int noseRgb, unsigned int mouthRgb) {
         using namespace Gdiplus;
         Pt noseCenter = projectHead3D(0.0f, 14.0f, 27.5f, yawRad, pitchRad);
         GraphicsState st = g.Save();
@@ -610,10 +644,10 @@ private:
         nose.AddBezier(PointF(4.1f, -1.0f), PointF(3.6f, 1.2f), PointF(1.1f, 3.2f), PointF(0.0f, 3.8f));
         nose.AddBezier(PointF(0.0f, 3.8f), PointF(-1.1f, 3.2f), PointF(-3.6f, 1.2f), PointF(-4.1f, -1.0f));
         nose.CloseFigure();
-        SolidBrush noseBrush(rgb(0xD88F91));
+        SolidBrush noseBrush(rgb(noseRgb));
         g.FillPath(&noseBrush, &nose);
 
-        Pen mouthPen(rgb(0x78615F, 205), 0.9f);
+        Pen mouthPen(rgb(mouthRgb, 205), 0.9f);
         mouthPen.SetStartCap(LineCapRound);
         mouthPen.SetEndCap(LineCapRound);
         g.DrawLine(&mouthPen, 0.0f, 2.8f, 0.0f, 5.2f);
@@ -761,7 +795,7 @@ private:
             return {seatX+x*sx*bodyWidthScale(coat)*c+43*sy*s, std::max(seatY+x*sx*bodyWidthScale(coat)*s-43*sy*c,floor)};
         };
         Pt leftShoulder=shoulder(-20), rightShoulder=shoulder(20);
-        float limbScale = coat == CatCoatTheme::Meimei ? 1.12f : 1.0f;
+        float limbScale = coat == CatCoatTheme::Meimei ? 1.12f : (coat == CatCoatTheme::Mumu ? 1.16f : 1.0f);
 
         if (lDist < 6.0f && !physics.leftPawOnMouse && !physics.leftPawTyping) {
             drawIdleFrontLeg(g, { seatX - 18.0f, seatY - 30.0f }, { seatX - 16.0f, seatY + 12.0f }, true, coat);
@@ -782,7 +816,7 @@ private:
     static void drawIdleFrontLeg(Gdiplus::Graphics& g, Pt top, Pt bottom, bool isLeft, CatCoatTheme coat) {
         using namespace Gdiplus;
         float sign = isLeft ? -1.0f : 1.0f;
-        float widthScale = coat == CatCoatTheme::Meimei ? 1.14f : 1.0f;
+        float widthScale = coat == CatCoatTheme::Meimei ? 1.14f : (coat == CatCoatTheme::Mumu ? 1.18f : 1.0f);
 
         if (coat == CatCoatTheme::Siamese) {
             GraphicsPath lp;
@@ -850,7 +884,11 @@ private:
 
         if (coat != CatCoatTheme::Siamese) {
             SolidBrush b(limbColor(coat));
-            if (patterned(coat)) {
+            if (coat == CatCoatTheme::Meimei) {
+                // Sitting pose front legs are covered by the white bib, so raised arms stay solid white too.
+                SolidBrush arm(pawColor(coat));
+                g.FillPath(&arm, &limbPath);
+            } else if (patterned(coat)) {
                 LinearGradientBrush gradient(PointF(start.x,start.y),PointF(end.x,end.y),pawColor(coat),limbColor(coat));
                 gradient.SetWrapMode(WrapModeTileFlipXY);
                 Color colors[3]={pawColor(coat),limbColor(coat),limbColor(coat)};
@@ -864,6 +902,13 @@ private:
                 for (int i=steps; i>=first; --i) points.push_back(rightEdge[i]);
                 SolidBrush cuff(pawColor(coat));
                 g.FillPolygon(&cuff, points.data(), (INT)points.size()); g.FillEllipse(&cuff, pawRect);
+            }
+            if (coat == CatCoatTheme::Meimei) {
+                // Both sitting-leg crease lines, so the all-white arm keeps its silhouette on the white bib.
+                Pen edge(creaseColor(coat), 1.45f);
+                edge.SetStartCap(LineCapRound); edge.SetEndCap(LineCapRound); edge.SetLineJoin(LineJoinRound);
+                g.DrawLines(&edge, leftEdge.data() + 1, (INT)leftEdge.size() - 2);
+                g.DrawLines(&edge, rightEdge.data() + 1, (INT)rightEdge.size() - 2);
             }
         } else {
             // Pad gradient endpoints beyond limb geometry + use WrapModeTileFlipXY so GDI+
