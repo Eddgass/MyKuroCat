@@ -13,7 +13,8 @@ enum class CatCoatTheme : int {
     ClassicBlack = 0,
     Siamese = 1,
     Shorthair = 2,
-    OrangeWhite = 3
+    OrangeWhite = 3,
+    Meimei = 4
 };
 
 enum class KeyboardTheme : int {
@@ -58,7 +59,7 @@ struct CatSettings {
         fullClickThrough = readDword(L"FullClickThrough", 0) != 0;
         alwaysOnTop      = readDword(L"AlwaysOnTop", 1) != 0;
         scale            = std::clamp((float)readDword(L"ScalePct", 100) / 100.0f, 0.5f, 2.0f);
-        coatTheme        = (CatCoatTheme)std::clamp((int)readDword(L"CoatTheme", 0), 0, 3);
+        coatTheme        = (CatCoatTheme)std::clamp((int)readDword(L"CoatTheme", 0), 0, 4);
         keyboardTheme    = (KeyboardTheme)std::clamp((int)readDword(L"KeyboardTheme", 0), 0, 2);
         eyeTheme         = (EyeColorTheme)std::clamp((int)readDword(L"EyeTheme", 0), 0, 5);
         DWORD hasPos     = readDword(L"HasPos", 0);
@@ -225,7 +226,7 @@ public:
         }
     }
 
-    void triggerMouseClick(int button, bool isDown) {
+    void triggerMouseClick(int button, bool isDown, const CatSettings& settings) {
         sleepiness = 0.0f;
         if (isDown) {
             if (button == 0) {
@@ -237,6 +238,14 @@ public:
             }
             pupilScale.target = 1.12f;
             earTwitch.velocity -= 2.2f;
+
+            if (settings.showKeyBadges && (button == 0 || button == 1)) {
+                Pt mousePoint = {
+                    MouseBaseCenter.x + mouseOffset.point().x,
+                    MouseBaseCenter.y + mouseOffset.point().y
+                };
+                spawnFloatingKeycap(button == 0 ? L"LMB" : L"RMB", mousePoint, nowSeconds());
+            }
         } else {
             if (button == 0) mousePressLeft.target = 0.0f;
             else mousePressRight.target = 0.0f;
