@@ -39,6 +39,10 @@ enum MenuCmd : UINT {
     CMD_COAT_SIAMESE,
     CMD_COAT_SHORTHAIR,
     CMD_COAT_ORANGE_WHITE,
+    CMD_COAT_MEIMEI,
+    CMD_COAT_MUMU,
+    CMD_COAT_DIDI,
+    CMD_COAT_TIAOTIAO,
     CMD_KB_MILK,
     CMD_KB_HACKER,
     CMD_KB_RETRO,
@@ -48,6 +52,7 @@ enum MenuCmd : UINT {
     CMD_EYE_CYAN,
     CMD_EYE_SOFT_AMBER,
     CMD_EYE_REFERENCE_HAZEL,
+    CMD_EYE_DEEP_AMBER,
     CMD_SCALE_65,
     CMD_SCALE_85,
     CMD_SCALE_100,
@@ -294,6 +299,10 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Siamese ? MF_CHECKED : 0), CMD_COAT_SIAMESE, L"\u6316\u7164\u66B9\u7F57\u732B");
     AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Shorthair ? MF_CHECKED : 0), CMD_COAT_SHORTHAIR, L"美短（银虎斑加白）");
     AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::OrangeWhite ? MF_CHECKED : 0), CMD_COAT_ORANGE_WHITE, L"橘白猫");
+    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Meimei ? MF_CHECKED : 0), CMD_COAT_MEIMEI, L"妹妹");
+    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Mumu ? MF_CHECKED : 0), CMD_COAT_MUMU, L"木木");
+    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Didi ? MF_CHECKED : 0), CMD_COAT_DIDI, L"弟弟");
+    AppendMenuW(coatMenu, MF_STRING | (app.settings.coatTheme == CatCoatTheme::Tiaotiao ? MF_CHECKED : 0), CMD_COAT_TIAOTIAO, L"条条");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)coatMenu, L"\u732B\u54AA\u76AE\u80A4");
 
     // Keyboard Theme submenu
@@ -311,6 +320,7 @@ void showContextMenu(AppState& app, POINT screenPt) {
     AppendMenuW(eyeMenu, MF_STRING | (app.settings.eyeTheme == EyeColorTheme::IceCyan ? MF_CHECKED : 0), CMD_EYE_CYAN, L"\u51B0\u6676\u6D45\u84DD");
     AppendMenuW(eyeMenu, MF_STRING | (app.settings.eyeTheme == EyeColorTheme::SoftAmber ? MF_CHECKED : 0), CMD_EYE_SOFT_AMBER, L"柔和琥珀");
     AppendMenuW(eyeMenu, MF_STRING | (app.settings.eyeTheme == EyeColorTheme::ReferenceHazel ? MF_CHECKED : 0), CMD_EYE_REFERENCE_HAZEL, L"淡金青绿");
+    AppendMenuW(eyeMenu, MF_STRING | (app.settings.eyeTheme == EyeColorTheme::DeepAmber ? MF_CHECKED : 0), CMD_EYE_DEEP_AMBER, L"深琥珀");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)eyeMenu, L"\u77B3\u8272\u5207\u6362");
 
     // Scale submenu
@@ -384,8 +394,29 @@ void showContextMenu(AppState& app, POINT screenPt) {
             app.settings.eyeTheme = EyeColorTheme::SoftAmber;
             app.settings.saveToRegistry();
             break;
+        case CMD_COAT_MEIMEI:
+            app.settings.coatTheme = CatCoatTheme::Meimei;
+            app.settings.eyeTheme = EyeColorTheme::SoftAmber;
+            app.settings.saveToRegistry();
+            break;
+        case CMD_COAT_MUMU:
+            app.settings.coatTheme = CatCoatTheme::Mumu;
+            app.settings.eyeTheme = EyeColorTheme::WarmAmber;
+            app.settings.saveToRegistry();
+            break;
+        case CMD_COAT_DIDI:
+            app.settings.coatTheme = CatCoatTheme::Didi;
+            app.settings.eyeTheme = EyeColorTheme::ReferenceHazel;
+            app.settings.saveToRegistry();
+            break;
+        case CMD_COAT_TIAOTIAO:
+            app.settings.coatTheme = CatCoatTheme::Tiaotiao;
+            app.settings.eyeTheme = EyeColorTheme::DeepAmber;
+            app.settings.saveToRegistry();
+            break;
         case CMD_EYE_SOFT_AMBER: app.settings.eyeTheme = EyeColorTheme::SoftAmber; app.settings.saveToRegistry(); break;
         case CMD_EYE_REFERENCE_HAZEL: app.settings.eyeTheme = EyeColorTheme::ReferenceHazel; app.settings.saveToRegistry(); break;
+        case CMD_EYE_DEEP_AMBER: app.settings.eyeTheme = EyeColorTheme::DeepAmber; app.settings.saveToRegistry(); break;
         case CMD_KB_MILK:   app.settings.keyboardTheme = KeyboardTheme::ClassicMilk; app.settings.saveToRegistry(); break;
         case CMD_KB_HACKER: app.settings.keyboardTheme = KeyboardTheme::MidnightHacker; app.settings.saveToRegistry(); break;
         case CMD_KB_RETRO:  app.settings.keyboardTheme = KeyboardTheme::RetroCream; app.settings.saveToRegistry(); break;
@@ -455,7 +486,7 @@ void tickAndRender(AppState& app) {
                 (float)(cur.x - wr.left) / (float)w * CatPhysics::CanvasWidth,
                 (float)(cur.y - wr.top)  / (float)h * CatPhysics::CanvasHeight
             };
-            CatHitZone zone = CatRenderer::hitTest(cp, app.physics);
+            CatHitZone zone = CatRenderer::hitTest(cp, app.physics, app.settings.coatTheme);
             if (zone == CatHitZone::Head || zone == CatHitZone::Body) {
                 if (app.hasLastHover) {
                     float d = std::hypot(cp.x - app.lastHoverCanvas.x, cp.y - app.lastHoverCanvas.y);
@@ -660,7 +691,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     }
 
     app.input.onKeyDown = [&](PhysicalKey k) { app.physics.triggerKeyDown(k, app.settings); };
-    app.input.onMouseClick = [&](int btn, bool down) { app.physics.triggerMouseClick(btn, down); };
+    app.input.onMouseClick = [&](int btn, bool down) { app.physics.triggerMouseClick(btn, down, app.settings); };
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
