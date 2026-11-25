@@ -70,6 +70,9 @@ public:
         // 5. Unified C1-Continuous Silhouette (+ 2.5D Siamese Mask)
         drawUnifiedSilhouette(g, seatX, seatY, headCenter, breath, physics, settings.coatTheme);
 
+        // 5.5 Crochet neck ruff (Tiaotiao)
+        drawNeckRuff(g, headCenter, physics, settings.coatTheme);
+
         // 6. Hind Foot (3rd simultaneous key easter egg!)
         if (physics.hindFootActive.value > 0.03f) {
             drawHindFoot(g, seatX, seatY, physics, settings.coatTheme);
@@ -101,7 +104,7 @@ private:
     static Gdiplus::Color siameseOutline(BYTE a = 224){ return Gdiplus::Color(a, 66, 48, 40); }
     static Gdiplus::Color siameseWhisker(BYTE a = 174){ return Gdiplus::Color(a, 92, 69, 56); }
 
-    static bool patterned(CatCoatTheme c) { return c == CatCoatTheme::Shorthair || c == CatCoatTheme::OrangeWhite || c == CatCoatTheme::Meimei || c == CatCoatTheme::Didi; }
+    static bool patterned(CatCoatTheme c) { return c == CatCoatTheme::Shorthair || c == CatCoatTheme::OrangeWhite || c == CatCoatTheme::Meimei || c == CatCoatTheme::Didi || c == CatCoatTheme::Tiaotiao; }
     static Gdiplus::Color rgb(unsigned int hex, BYTE a = 255) { return Gdiplus::Color(a, (hex >> 16) & 255, (hex >> 8) & 255, hex & 255); }
     static Gdiplus::Color bodyColor(CatCoatTheme c) {
         switch (c) {
@@ -109,6 +112,7 @@ private:
             case CatCoatTheme::Meimei:      return rgb(0xAEB4B5);
             case CatCoatTheme::Mumu:        return rgb(0x8C939B);
             case CatCoatTheme::Didi:        return rgb(0xB2B6B1);
+            case CatCoatTheme::Tiaotiao:    return rgb(0xA89B84);
             case CatCoatTheme::OrangeWhite: return rgb(0xF2EEE4);
             default: return catBlack();
         }
@@ -120,6 +124,7 @@ private:
             case CatCoatTheme::Meimei:      return rgb(0xF8F7F2);
             case CatCoatTheme::Mumu:        return rgb(0x8C939B);
             case CatCoatTheme::Didi:        return rgb(0xB2B6B1);
+            case CatCoatTheme::Tiaotiao:    return rgb(0xA89B84);
             case CatCoatTheme::Shorthair:
             case CatCoatTheme::OrangeWhite: return rgb(0xF2EEE4);
             default: return catBlack();
@@ -129,12 +134,13 @@ private:
     static Gdiplus::Color creaseColor(CatCoatTheme c, BYTE a = 255) {
         if (c == CatCoatTheme::Mumu) return rgb(0x555C64, (BYTE)(a * 0.78f));
         if (c == CatCoatTheme::Didi) return rgb(0x33373A, (BYTE)(a * 0.75f));
+        if (c == CatCoatTheme::Tiaotiao) return rgb(0x3B342B, (BYTE)(a * 0.78f));
         if (patterned(c)) return rgb(c == CatCoatTheme::Meimei ? 0x646B6D : 0x8B8171, (BYTE)(a*0.60f));
         return contourMint(a);
     }
-    static float headWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.12f : (c == CatCoatTheme::Mumu ? 1.16f : (c == CatCoatTheme::Didi ? 1.18f : 1.0f)); }
-    static float bodyWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.28f : (c == CatCoatTheme::Mumu ? 1.22f : (c == CatCoatTheme::Didi ? 1.04f : 1.0f)); }
-    static float bodyHeightScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.06f : (c == CatCoatTheme::Mumu ? 1.06f : (c == CatCoatTheme::Didi ? 1.42f : 1.0f)); }
+    static float headWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.12f : (c == CatCoatTheme::Mumu ? 1.16f : (c == CatCoatTheme::Didi ? 1.18f : (c == CatCoatTheme::Tiaotiao ? 0.94f : 1.0f))); }
+    static float bodyWidthScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.28f : (c == CatCoatTheme::Mumu ? 1.22f : (c == CatCoatTheme::Didi ? 1.04f : (c == CatCoatTheme::Tiaotiao ? 0.86f : 1.0f))); }
+    static float bodyHeightScale(CatCoatTheme c) { return c == CatCoatTheme::Meimei ? 1.06f : (c == CatCoatTheme::Mumu ? 1.06f : (c == CatCoatTheme::Didi ? 1.42f : (c == CatCoatTheme::Tiaotiao ? 1.34f : 1.0f))); }
     static Gdiplus::PointF coatMarkPoint(CoatPoint p, bool headSurface, bool skull, CatCoatTheme coat, float seatX, float seatY, Pt head, const CatPhysics& physics) {
         if (headSurface) {
             float depth=coat==CatCoatTheme::OrangeWhite ? 29.6f*std::sqrt(std::max(0.0f,1-p.x*p.x/(46*46)-p.y*p.y/(40*40))) : 27.5f;
@@ -150,7 +156,7 @@ private:
     }
     static void drawCoatMarks(Gdiplus::Graphics& g, float seatX, float seatY, Pt head, const CatPhysics& physics, CatCoatTheme coat) {
         using namespace Gdiplus;
-        const auto& marks = (coat == CatCoatTheme::Shorthair || coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Didi) ? shorthairMarks() : orangeWhiteMarks();
+        const auto& marks = (coat == CatCoatTheme::Shorthair || coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Didi || coat == CatCoatTheme::Tiaotiao) ? shorthairMarks() : orangeWhiteMarks();
         for (const auto& mark : marks) {
             std::vector<PointF> points;
             for (const auto& p : mark.points) points.push_back(coatMarkPoint(p, mark.head, mark.skull, coat, seatX, seatY, head, physics));
@@ -162,12 +168,21 @@ private:
             } else if (coat == CatCoatTheme::Didi) {
                 if (markColor == 0xF2EEE4) markColor = 0xC9CCC5;
                 else if (markColor == 0x363536) markColor = 0x2F3336;
+            } else if (coat == CatCoatTheme::Tiaotiao) {
+                if (markColor == 0xF2EEE4) markColor = 0xC9C0AE;
+                else if (markColor == 0x363536) markColor = 0x3B342B;
             }
             Color color = rgb(markColor, (BYTE)(mark.alpha*255));
             if (mark.width == 0) { path.AddPolygon(points.data(), (INT)points.size()); SolidBrush brush(color); g.FillPath(&brush, &path); }
             else {
-                float width = mark.width * (coat == CatCoatTheme::Didi ? 1.7f : 1.0f);
+                float width = mark.width * (coat == CatCoatTheme::Didi ? 1.7f : (coat == CatCoatTheme::Tiaotiao ? 1.45f : 1.0f));
                 path.AddLines(points.data(), (INT)points.size());
+                if (coat == CatCoatTheme::Tiaotiao) {
+                    // Wide translucent under-stroke, so the tabby bands fade softly instead of a hard edge.
+                    Pen halo(rgb(markColor, (BYTE)(mark.alpha * 85)), width * 1.8f);
+                    halo.SetStartCap(LineCapRound); halo.SetEndCap(LineCapRound); halo.SetLineJoin(LineJoinRound);
+                    g.DrawPath(&halo, &path);
+                }
                 Pen pen(color, width);
                 pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound); pen.SetLineJoin(LineJoinRound);
                 g.DrawPath(&pen, &path);
@@ -183,6 +198,7 @@ private:
             case EyeColorTheme::IceCyan:        return Gdiplus::Color(a, 115, 235, 245);
             case EyeColorTheme::ReferenceHazel: return Gdiplus::Color(a, 218, 178, 87);
             case EyeColorTheme::SoftAmber: return Gdiplus::Color(a, 217, 173, 85);
+            case EyeColorTheme::DeepAmber: return Gdiplus::Color(a, 196, 138, 48);
         }
         return Gdiplus::Color(a, 201, 242, 64);
     }
@@ -408,7 +424,7 @@ private:
         PointF c2(seatX + 66.0f + wag2 * 0.4f, seatY - 26.0f + wag1 * 0.7f + huntDrop);
         PointF tip(seatX + 91.0f + wag2 * 0.5f, seatY - 30.0f + wag1 * 0.85f + huntDrop);
 
-        Pen tailPen(earTailColor(coat), coat == CatCoatTheme::Mumu ? 13.0f : (coat == CatCoatTheme::Didi ? 16.0f : 11.0f));
+        Pen tailPen(earTailColor(coat), coat == CatCoatTheme::Mumu ? 13.0f : (coat == CatCoatTheme::Didi ? 16.0f : (coat == CatCoatTheme::Tiaotiao ? 9.0f : 11.0f)));
         tailPen.SetStartCap(LineCapRound);
         tailPen.SetEndCap(LineCapRound);
         tailPen.SetLineJoin(LineJoinRound);
@@ -417,13 +433,15 @@ private:
             GraphicsState state = g.Save();
             GraphicsPath outline; outline.AddBezier(root,c1,c2,tip); outline.Widen(&tailPen);
             g.SetClip(&outline, CombineModeIntersect);
-            unsigned int ringColor = coat == CatCoatTheme::Shorthair ? 0x55595A : (coat == CatCoatTheme::Meimei ? 0x646B6D : (coat == CatCoatTheme::Didi ? 0x2F3336 : 0xA57543));
-            float ringWidth = coat == CatCoatTheme::Didi ? 6.2f : 3.5f;
+            unsigned int ringColor = coat == CatCoatTheme::Shorthair ? 0x55595A : (coat == CatCoatTheme::Meimei ? 0x646B6D : (coat == CatCoatTheme::Didi ? 0x2F3336 : (coat == CatCoatTheme::Tiaotiao ? 0x3B342B : 0xA57543)));
+            float ringWidth = coat == CatCoatTheme::Didi ? 6.2f : (coat == CatCoatTheme::Tiaotiao ? 3.0f : 3.5f);
             float ringHalf = coat == CatCoatTheme::Didi ? 9.5f : 8.0f;
-            Pen ring(rgb(ringColor, (BYTE)(coat == CatCoatTheme::Didi ? 195 : 128)), ringWidth);
+            Pen ring(rgb(ringColor, (BYTE)(coat == CatCoatTheme::Didi ? 195 : (coat == CatCoatTheme::Tiaotiao ? 180 : 128))), ringWidth);
             const std::vector<float> ringTs = coat == CatCoatTheme::Didi
                 ? std::vector<float>{0.34f, 0.55f, 0.78f}
-                : std::vector<float>{0.50f, 0.78f};
+                : (coat == CatCoatTheme::Tiaotiao
+                    ? std::vector<float>{0.42f, 0.62f, 0.82f}
+                    : std::vector<float>{0.50f, 0.78f});
             for (float t : ringTs) {
                 float u=1-t;
                 float x=u*u*u*root.X+3*u*u*t*c1.X+3*u*t*t*c2.X+t*t*t*tip.X;
@@ -460,13 +478,14 @@ private:
         using namespace Gdiplus;
         float sign = isLeft ? -1.0f : 1.0f;
         float foldAngle = sign * (0.06f + fold * 0.34f) + twitch;
-        float tipLen = coat == CatCoatTheme::Didi ? 39.0f : 32.0f;
+        float tipLen = coat == CatCoatTheme::Didi ? 39.0f : (coat == CatCoatTheme::Tiaotiao ? 41.0f : 32.0f);
         float tipDx = std::sin(foldAngle) * tipLen;
         float tipDy = -std::cos(foldAngle) * tipLen;
 
+        bool wideEars = coat == CatCoatTheme::Tiaotiao;
         Pt innerBase = projectHead3D(sign * 9.0f, -16.0f, 0.0f, yawRad, pitchRad);
-        Pt outerBase = projectHead3D(sign * 35.0f, -5.0f, -2.0f, yawRad, pitchRad);
-        Pt tip3D     = projectHead3D(sign * 24.5f + tipDx, -20.0f + tipDy, -3.0f, yawRad, pitchRad);
+        Pt outerBase = projectHead3D(sign * (wideEars ? 39.5f : 35.0f), -5.0f, -2.0f, yawRad, pitchRad);
+        Pt tip3D     = projectHead3D(sign * (wideEars ? 27.0f : 24.5f) + tipDx, -20.0f + tipDy, -3.0f, yawRad, pitchRad);
 
         Pt tipL = { tip3D.x - sign * 3.8f, tip3D.y + 2.8f };
         Pt tipR = { tip3D.x + sign * 3.8f, tip3D.y + 3.2f };
@@ -479,7 +498,7 @@ private:
 
         SolidBrush b(earTailColor(coat));
         g.FillPath(&b, &ear);
-        if (coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Mumu || coat == CatCoatTheme::Didi) {
+        if (coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Mumu || coat == CatCoatTheme::Didi || coat == CatCoatTheme::Tiaotiao) {
             PointF innerPts[3] = {
                 PointF(tip3D.x, tip3D.y + 8.0f),
                 PointF(innerBase.x + sign * 5.0f, innerBase.y + 4.0f),
@@ -488,7 +507,8 @@ private:
             GraphicsPath innerEar;
             innerEar.AddPolygon(innerPts, 3);
             SolidBrush innerBrush(coat == CatCoatTheme::Meimei ? rgb(0xB97E79, 205)
-                                   : (coat == CatCoatTheme::Mumu ? rgb(0x9E8E92, 185) : rgb(0x8E7F7C, 190)));
+                                   : (coat == CatCoatTheme::Mumu ? rgb(0x9E8E92, 185)
+                                   : (coat == CatCoatTheme::Didi ? rgb(0x8E7F7C, 190) : rgb(0xB48F8B, 190))));
             g.FillPath(&innerBrush, &innerEar);
         }
         if (coat == CatCoatTheme::Didi) {
@@ -505,6 +525,43 @@ private:
                 g.DrawPath(&tuft, &tf);
             }
         }
+    }
+
+    // MARK: - Crochet Neck Ruff (Tiaotiao)
+
+    static void drawNeckRuff(Gdiplus::Graphics& g, Pt headCenter, const CatPhysics& physics, CatCoatTheme coat) {
+        if (coat != CatCoatTheme::Tiaotiao) return;
+        using namespace Gdiplus;
+        GraphicsState st = g.Save();
+        g.TranslateTransform(headCenter.x, headCenter.y);
+        g.RotateTransform(physics.headTilt.value * RadToDeg);
+
+        // Flower-shaped crochet ruff: a garland of round petals, clearly wider than the neck.
+        // Necklace-like ruff: petals follow an arc that dips at the front and rises around the neck sides.
+        // Wider than the neck silhouette, so the ruff spills past the body edges all the way around.
+        float halfW = 52.0f * bodyWidthScale(coat);
+        const int petals = 10;
+        const float baseY = 37.0f;
+        const float sag = 12.0f;
+
+        auto petalAt = [&](float u, float dy, float r, Color color) {
+            SolidBrush brush(color);
+            float cx = u * halfW;
+            float cy = baseY + sag * (1.0f - u * u) + dy;
+            g.FillEllipse(&brush, cx - r, cy - r, r * 2.0f, r * 2.0f);
+        };
+
+        for (int i = 0; i < petals; ++i) {
+            float u = -1.0f + 2.0f * (i + 0.5f) / petals;
+            petalAt(u, -5.4f, 5.9f, rgb(0xF4EEE4));   // white lace along the inner edge
+            petalAt(u,  5.6f, 6.6f, rgb(0xF4EEE4));   // white lace along the outer edge
+        }
+        for (int i = 0; i < petals; ++i) {
+            float u = -1.0f + 2.0f * (i + 0.5f) / petals;
+            petalAt(u, 0.0f, (i % 2 == 0) ? 8.2f : 7.4f, rgb(0xBF3A3F));
+        }
+
+        g.Restore(st);
     }
 
     // MARK: - Unified C1-Continuous Cat Silhouette (+ Siamese 2.5D Face Mask)
@@ -647,13 +704,15 @@ private:
         float yawRad = physics.headYaw.value * 0.50f;
         float pitchRad = physics.headPitch.value * 0.36f;
 
-        if (coat == CatCoatTheme::Mumu) {
-            // Soft lighter muzzle so the round British Shorthair face reads on the solid blue fur.
+        if (coat == CatCoatTheme::Mumu || coat == CatCoatTheme::Tiaotiao) {
+            // Soft lighter muzzle patch (Mumu's round cheeks / Tiaotiao's pale mouth mask).
+            bool tiaoMuzzle = coat == CatCoatTheme::Tiaotiao;
             Pt muzzle = projectHead3D(0.0f, 13.0f, 26.5f, yawRad, pitchRad);
             GraphicsPath muzzlePath;
-            muzzlePath.AddEllipse(muzzle.x - 17.0f, muzzle.y - 12.0f, 34.0f, 24.0f);
+            muzzlePath.AddEllipse(muzzle.x - (tiaoMuzzle ? 23.0f : 17.0f), muzzle.y - (tiaoMuzzle ? 17.0f : 12.0f),
+                                  tiaoMuzzle ? 46.0f : 34.0f, tiaoMuzzle ? 34.0f : 24.0f);
             PathGradientBrush muzzleBrush(&muzzlePath);
-            muzzleBrush.SetCenterColor(rgb(0xC4C9CD, 165));
+            muzzleBrush.SetCenterColor(tiaoMuzzle ? rgb(0xEDE7D8, 235) : rgb(0xC4C9CD, 165));
             Color edge[] = { rgb(0xB3B9BE, 0) };
             int edgeCount = 1;
             muzzleBrush.SetSurroundColors(edge, &edgeCount);
@@ -664,6 +723,7 @@ private:
         if (coat == CatCoatTheme::Meimei) drawCatNose(g, yawRad, pitchRad, 0xD88F91, 0x78615F);
         else if (coat == CatCoatTheme::Mumu) drawCatNose(g, yawRad, pitchRad, 0x9C8B8F, 0x4E545B);
         else if (coat == CatCoatTheme::Didi) drawCatNose(g, yawRad, pitchRad, 0xC79A96, 0x3F4347);
+        else if (coat == CatCoatTheme::Tiaotiao) drawCatNose(g, yawRad, pitchRad, 0xBE8C86, 0x4A4038);
         drawWhiskers3D(g, yawRad, pitchRad, physics, coat);
         g.Restore(st);
     }
@@ -795,11 +855,13 @@ private:
     static void drawWhiskers3D(Gdiplus::Graphics& g, float yawRad, float pitchRad, const CatPhysics& physics, CatCoatTheme coat) {
         using namespace Gdiplus;
         bool longWhiskers = coat == CatCoatTheme::Didi;
+        bool tiaoWhiskers = coat == CatCoatTheme::Tiaotiao;
         float wiggle = std::sin(physics.time * 4.5f) * (std::max(physics.petHeadIntensity, physics.petBodyIntensity) * 1.2f);
         Pen pen(coat == CatCoatTheme::Siamese ? siameseWhisker()
             : (coat == CatCoatTheme::Meimei ? rgb(0xF2F0EA,210)
             : (coat == CatCoatTheme::Didi ? rgb(0xEDEFEC,205)
-            : (patterned(coat) ? rgb(0x8D8170,174) : whiskerWhite()))), longWhiskers ? 1.55f : 1.05f);
+            : (coat == CatCoatTheme::Tiaotiao ? rgb(0xEDE9E0,195)
+            : (patterned(coat) ? rgb(0x8D8170,174) : whiskerWhite())))), longWhiskers ? 1.55f : (tiaoWhiskers ? 1.6f : 1.05f));
         pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound);
 
         const float rowsNormal[3][3] = {
@@ -813,8 +875,14 @@ private:
             { 14.2f, 46.0f, 26.0f + wiggle * 0.5f },
             { 18.0f, 43.5f, 32.0f - wiggle * 0.4f }
         };
-        const float (*rows)[3] = longWhiskers ? rowsLong : rowsNormal;
-        float ctrlDrop = longWhiskers ? 2.6f : -0.8f;
+        // Li Hua whiskers: long, slightly drooping and reaching past the cheek outline.
+        const float rowsTiao[3][3] = {
+            { 10.5f, 46.0f, 14.0f + wiggle },
+            { 14.2f, 48.0f, 19.0f + wiggle * 0.5f },
+            { 18.0f, 45.5f, 23.5f - wiggle * 0.4f }
+        };
+        const float (*rows)[3] = longWhiskers ? rowsLong : (tiaoWhiskers ? rowsTiao : rowsNormal);
+        float ctrlDrop = longWhiskers ? 2.6f : (tiaoWhiskers ? 0.8f : -0.8f);
 
         for (float sign : {-1.0f, 1.0f}) {
             for (int i = 0; i < 3; ++i) {
@@ -846,11 +914,11 @@ private:
             return {seatX+x*sx*bodyWidthScale(coat)*c+torsoY*s, std::max(seatY+x*sx*bodyWidthScale(coat)*s-torsoY*c,floor)};
         };
         Pt leftShoulder=shoulder(-20), rightShoulder=shoulder(20);
-        float limbScale = coat == CatCoatTheme::Meimei ? 1.12f : (coat == CatCoatTheme::Mumu ? 1.16f : (coat == CatCoatTheme::Didi ? 1.18f : 1.0f));
+        float limbScale = coat == CatCoatTheme::Meimei ? 1.12f : (coat == CatCoatTheme::Mumu ? 1.16f : (coat == CatCoatTheme::Didi ? 1.18f : (coat == CatCoatTheme::Tiaotiao ? 0.9f : 1.0f)));
 
         // Taller Didi legs start higher on the body and reach down to the keyboard instead of floating.
-        float legTop = seatY - (coat == CatCoatTheme::Didi ? 38.0f : 30.0f);
-        float legBottom = seatY + (coat == CatCoatTheme::Didi ? 19.0f : 12.0f);
+        float legTop = seatY - (coat == CatCoatTheme::Didi ? 38.0f : (coat == CatCoatTheme::Tiaotiao ? 36.0f : 30.0f));
+        float legBottom = seatY + (coat == CatCoatTheme::Didi ? 19.0f : (coat == CatCoatTheme::Tiaotiao ? 18.0f : 12.0f));
 
         if (lDist < 6.0f && !physics.leftPawOnMouse && !physics.leftPawTyping) {
             drawIdleFrontLeg(g, { seatX - 18.0f, legTop }, { seatX - 16.0f, legBottom }, true, coat);
@@ -871,7 +939,7 @@ private:
     static void drawIdleFrontLeg(Gdiplus::Graphics& g, Pt top, Pt bottom, bool isLeft, CatCoatTheme coat) {
         using namespace Gdiplus;
         float sign = isLeft ? -1.0f : 1.0f;
-        float widthScale = coat == CatCoatTheme::Meimei ? 1.14f : (coat == CatCoatTheme::Mumu ? 1.18f : (coat == CatCoatTheme::Didi ? 1.14f : 1.0f));
+        float widthScale = coat == CatCoatTheme::Meimei ? 1.14f : (coat == CatCoatTheme::Mumu ? 1.18f : (coat == CatCoatTheme::Didi ? 1.14f : (coat == CatCoatTheme::Tiaotiao ? 0.92f : 1.0f)));
 
         if (coat == CatCoatTheme::Siamese) {
             GraphicsPath lp;
@@ -903,13 +971,17 @@ private:
         addQuadBezier(p2, { top.x - sign * 7.0f*widthScale, top.y + 4.0f }, { top.x - sign * 6.5f*widthScale, (top.y + bottom.y) * 0.5f }, { bottom.x - sign * 6.0f*widthScale, bottom.y - 1.0f });
         g.DrawPath(&p, &p2);
 
-        if (coat == CatCoatTheme::Didi) {
-            Pen band(rgb(0x2F3336, 210), 3.4f);
+        if (coat == CatCoatTheme::Didi || coat == CatCoatTheme::Tiaotiao) {
+            bool didi = coat == CatCoatTheme::Didi;
+            Pen band(didi ? rgb(0x2F3336, 210) : rgb(0x3B342B, 215), didi ? 3.4f : 3.4f);
+            Pen bandHalo(didi ? rgb(0x2F3336, 0) : rgb(0x3B342B, 90), didi ? 3.4f : 5.6f);
             band.SetStartCap(LineCapRound); band.SetEndCap(LineCapRound);
+            bandHalo.SetStartCap(LineCapRound); bandHalo.SetEndCap(LineCapRound);
             for (float t : {0.34f, 0.54f, 0.74f}) {
                 float y = top.y + (bottom.y - top.y) * t;
                 float cx = top.x + (bottom.x - top.x) * t;
                 float half = 6.2f * widthScale;
+                if (!didi) g.DrawLine(&bandHalo, cx - half, y, cx + half, y);
                 g.DrawLine(&band, cx - half, y, cx + half, y);
             }
         }
@@ -969,7 +1041,7 @@ private:
                 SolidBrush cuff(pawColor(coat));
                 g.FillPolygon(&cuff, points.data(), (INT)points.size()); g.FillEllipse(&cuff, pawRect);
             }
-            if (coat == CatCoatTheme::Didi) {
+            if (coat == CatCoatTheme::Didi || coat == CatCoatTheme::Tiaotiao) {
                 // Tabby bands across the raised forearm, matching the striped legs in the sitting pose.
                 GraphicsState bs = g.Save();
                 g.SetClip(&limbPath, CombineModeIntersect);
@@ -979,13 +1051,17 @@ private:
                     float len = std::max(0.001f, std::hypot(tan.x, tan.y));
                     float nx = -tan.y / len, ny = tan.x / len;
                     float half = (startW + (endW - startW) * t) * 0.62f;
-                    Pen band(rgb(0x2F3336, 210), 3.6f);
+                    bool didi = coat == CatCoatTheme::Didi;
+                    Pen band(didi ? rgb(0x2F3336, 210) : rgb(0x3B342B, 215), didi ? 3.6f : 3.5f);
+                    Pen bandHalo(didi ? rgb(0x2F3336, 0) : rgb(0x3B342B, 90), didi ? 3.6f : 6.2f);
                     band.SetStartCap(LineCapRound); band.SetEndCap(LineCapRound);
+                    bandHalo.SetStartCap(LineCapRound); bandHalo.SetEndCap(LineCapRound);
+                    if (!didi) g.DrawLine(&bandHalo, p.x - nx * half, p.y - ny * half, p.x + nx * half, p.y + ny * half);
                     g.DrawLine(&band, p.x - nx * half, p.y - ny * half, p.x + nx * half, p.y + ny * half);
                 }
                 g.Restore(bs);
             }
-            if (coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Didi) {
+            if (coat == CatCoatTheme::Meimei || coat == CatCoatTheme::Didi || coat == CatCoatTheme::Tiaotiao) {
                 // Both sitting-leg crease lines, so the arm keeps its silhouette on same-coloured fur / the white bib.
                 Pen edge(creaseColor(coat), 1.45f);
                 edge.SetStartCap(LineCapRound); edge.SetEndCap(LineCapRound); edge.SetLineJoin(LineJoinRound);
