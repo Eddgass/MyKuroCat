@@ -6,7 +6,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PREFIX="${MINGW_PREFIX:-x86_64-w64-mingw32}"
-CXX="${CXX:-${PREFIX}-g++}"
+# The sources use std::thread / std::mutex, which MinGW only provides in its posix-threads
+# variant (the win32 one lacks <thread>). Prefer the -posix compiler when it is installed.
+if [ -z "${CXX:-}" ]; then
+    if command -v "${PREFIX}-g++-posix" >/dev/null 2>&1; then
+        CXX="${PREFIX}-g++-posix"
+    else
+        CXX="${PREFIX}-g++"
+    fi
+fi
 WINDRES="${WINDRES:-${PREFIX}-windres}"
 
 if ! command -v "$CXX" >/dev/null 2>&1; then
@@ -22,12 +30,15 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 EXTRA_INPUTS=()
 if command -v "$WINDRES" >/dev/null 2>&1; then
+    # resource.rc carries the VERSIONINFO block (as upstream's MSVC/MinGW builds do).
+    "$WINDRES" -O coff -o "$TMP_DIR/resource.o" resource.rc
+    EXTRA_INPUTS=("$TMP_DIR/resource.o")
     # Resource id 1 / type 24 is RT_MANIFEST: same effect as MSVC's /MANIFEST:EMBED.
     printf '1 24 "%s/app.manifest"\n' "$PWD" > "$TMP_DIR/app.manifest.rc"
     "$WINDRES" -O coff -o "$TMP_DIR/app.manifest.o" "$TMP_DIR/app.manifest.rc"
-    EXTRA_INPUTS=("$TMP_DIR/app.manifest.o")
+    EXTRA_INPUTS+=("$TMP_DIR/app.manifest.o")
 else
-    echo "==> [WARN] $WINDRES not found, building without the DPI-awareness manifest"
+    echo "==> [WARN] $WINDRES not found, building without VERSIONINFO / DPI-awareness manifest"
 fi
 
 # WINVER/_WIN32_WINNT 0x0A00 exposes SetProcessDpiAwarenessContext used by main.cpp.
@@ -35,6 +46,6 @@ fi
     -ffunction-sections -fdata-sections -Wl,--gc-sections \
     -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
     src/main.cpp ${EXTRA_INPUTS[@]+"${EXTRA_INPUTS[@]}"} -o KuroCat.exe \
-    -luser32 -lgdi32 -lgdiplus -lshell32 -ladvapi32 -lwinhttp -lwtsapi32
+    -luser32 -lgdi32 -lgdiplus -lshell32 -ladvapi32 -lwinhttp -lwtsapi32 -lole32
 
 echo "==> Built successfully: $PWD/KuroCat.exe"

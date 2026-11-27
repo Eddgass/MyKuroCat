@@ -1,27 +1,71 @@
 import Foundation
 import AppKit
+import CoreAudio
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum RenderCadence {
+        case paused
+        case fullscreenHidden // 2 Hz check while hidden behind a fullscreen app
+        case asleep           // 15 Hz adaptive cadence while sleeping
+        case idle             // 30 Hz adaptive cadence while awake at rest
+        case active           // 60 Hz full cadence during input or motion
+
+        var interval: TimeInterval {
+            switch self {
+            case .paused:           return 0
+            case .fullscreenHidden: return 0.5
+            case .asleep:           return 1.0 / 15.0
+            case .idle:             return 1.0 / 30.0
+            case .active:           return 1.0 / 60.0
+            }
+        }
+
+        var tolerance: TimeInterval {
+            switch self {
+            case .paused:           return 0
+            case .fullscreenHidden: return 0.15
+            case .asleep:           return 0.012
+            case .idle:             return 0.004
+            case .active:           return 0.002
+            }
+        }
+    }
+
     private var statusItem: NSStatusItem!
     private var overlayWindow: OverlayWindow!
     private var renderTimer: Timer?
+    private var renderCadence: RenderCadence = .paused
     private var windowWatchdogTimer: Timer?
     private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
+    private var lastMusicCheckTime: CFTimeInterval = 0
+    private var musicAudioSustainedSince: CFTimeInterval = 0
+    private var cachedMusicPlaying: Bool = false
+    private let musicCheckQueue = DispatchQueue(label: "com.kurocat.musiccheck", qos: .utility)
     private var lastFullscreenCheckTime: CFTimeInterval = 0
     private var hiddenByFullscreen = false
-    private var ticksSinceLastRedraw = 0
+    private var screensAsleep = false
     private var lastDemoKeyTime: CFTimeInterval = 0
     private var isPetVisible = true
     private var availableUpdateVersion: String?
     private var availableUpdateURL: URL?
     private var availableAssetURL: URL?
     private var isUpdating = false
+    private var isCheckingUpdates = false
+    private var pendingManualUpdateCheck = false
     private var isHandingOverToNewerCopy = false
+    private var modalAlertDepth = 0
+    private var isPresentingModalAlert: Bool { modalAlertDepth > 0 }
     private var dressingRoom: DressingRoomWindowController?
     private var settingsWindow: SettingsWindowController?
+    private var skinManagerWindow: SkinBatchDeleteWindowController?
+    private var updatePromptController: UpdatePromptWindowController?
+
+    // MARK: - Hourly Announcement
+    private var minuteTimer: Timer?
+    private var lastAnnouncedHour: Int = -1
 
     private var currentAppVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.1"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.7"
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -37,8 +81,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         catView.onRightClickMenu = { [weak self] event in
             guard let self else { return }
+            self.wakeToActive()
             let menu = self.buildMenu()
             NSMenu.popUpContextMenu(menu, with: event, for: self.overlayWindow.catView)
+        }
+        catView.onUserInteraction = { [weak self] in
+            self?.wakeToActive()
         }
         catView.onDropSkinFiles = { [weak self] urls in
             for url in urls { self?.importDroppedFile(from: url) }
@@ -48,23 +96,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let engine = InputEngine.shared
         engine.onKeyDown = { [weak self] key in
             DispatchQueue.main.async {
-                self?.overlayWindow.catView.physics.triggerKeyDown(key)
+                guard let self else { return }
+                self.overlayWindow.catView.physics.triggerKeyDown(key)
+                self.wakeToActive()
             }
         }
         engine.onMouseClick = { [weak self] button, isDown in
             DispatchQueue.main.async {
-                self?.overlayWindow.catView.physics.triggerMouseClick(button: button, isDown: isDown)
+                guard let self else { return }
+                self.overlayWindow.catView.physics.triggerMouseClick(button: button, isDown: isDown)
+                self.wakeToActive()
             }
         }
         engine.start()
 
         setupStatusItem()
+        updateStatusItemToolTip()
         if isAutoStartEnabled() {
             // Keep LaunchAgent path updated if user moved KuroCat.app into /Applications
             _ = setAutoStartEnabled(true)
         }
+        observePowerNotifications()
         startRenderLoop()
         startWindowWatchdog()
+        startHourlyAnnouncement()
 
         // Auto-check GitHub Releases for updates shortly after launch
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -76,10 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Quitting during launch because a newer copy is running: leave its stats alone.
         if isHandingOverToNewerCopy { return }
         renderTimer?.invalidate()
+        renderTimer = nil
+        renderCadence = .paused
         windowWatchdogTimer?.invalidate()
+        minuteTimer?.invalidate()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         InputEngine.shared.flushStats()
         InputEngine.shared.stop()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     // MARK: - One KuroCat at a time (newest copy wins)
@@ -157,67 +219,274 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Adaptive Redraw
 
+    private func observePowerNotifications() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(self, selector: #selector(handleScreenOrSystemSleep),
+                       name: NSWorkspace.screensDidSleepNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleScreenOrSystemWake),
+                       name: NSWorkspace.screensDidWakeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleScreenOrSystemSleep),
+                       name: NSWorkspace.willSleepNotification, object: nil)
+        nc.addObserver(self, selector: #selector(handleScreenOrSystemWake),
+                       name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc private func handleScreenOrSystemSleep() {
+        screensAsleep = true
+        configureRenderTimer(for: .paused)
+    }
+
+    @objc private func handleScreenOrSystemWake() {
+        screensAsleep = false
+        lastFrameTime = CACurrentMediaTime()
+        wakeToActive(immediateRedraw: true)
+    }
+
     private func startRenderLoop() {
         lastFrameTime = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            guard let self, self.isPetVisible else { return }
-            let now = CACurrentMediaTime()
-            let dt = CGFloat(now - self.lastFrameTime)
-            self.lastFrameTime = now
+        wakeToActive()
+    }
 
-            // Fullscreen auto-hide check (~2Hz)
-            if now - self.lastFullscreenCheckTime > 0.5 {
-                self.lastFullscreenCheckTime = now
-                let s = CatSettings.shared
-                let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
-                if s.autoHideFullscreen && !obsBg {
-                    let fs = Self.isOtherAppFullscreen()
-                    if fs != self.hiddenByFullscreen {
-                        self.hiddenByFullscreen = fs
-                        self.overlayWindow.alphaValue = fs ? 0.0 : 1.0
-                        if fs { self.overlayWindow.ignoresMouseEvents = true }
-                    }
-                } else if self.hiddenByFullscreen {
-                    self.hiddenByFullscreen = false
-                    self.overlayWindow.alphaValue = 1.0
-                }
-            }
-
-            let view = self.overlayWindow.catView
-            let physics = view.physics
-            let input = InputEngine.shared
-            let windowFrame = self.overlayWindow.frame
-            let previousMouseMoveTime = input.lastMouseMoveTime
-            let wasBlinking = physics.isBlinking
-            let wasYawning = physics.isYawning
-            physics.step(dt: dt, windowFrameInScreen: windowFrame)
-            view.updateHoverAndClickThrough()
-
-            // Track the mouse at 60 Hz. Ordinary movement away from the pet can share the idle redraw cadence.
-            let lastDirectInput = max(input.lastKeyActivityTime, input.lastMouseClickTime, self.lastDemoKeyTime)
-            let mouseMoving = now - input.lastMouseMoveTime < 0.12
-            let mouseStartedMoving = mouseMoving && now - previousMouseMoveTime >= 0.12
-            let mouseNearPet = mouseMoving && windowFrame.insetBy(dx: -24, dy: -24).contains(input.lastMouseLocation)
-            let isAsleep = physics.sleepiness >= 0.95
-            let isActive = now - lastDirectInput < 0.8 || !input.activeKeys.isEmpty
-                || mouseStartedMoving || mouseNearPet
-                || input.leftMouseDown || input.rightMouseDown || input.otherMouseDown || view.isDraggingOrResizing
-                || !physics.keyGlow.isEmpty || !physics.floatingKeycaps.isEmpty
-                || physics.petHeadIntensity > 0.02 || physics.huntIntensity.value > 0.02
-                || physics.scruffDrag.value > 0.02 || physics.lieIntensity.value > 0.02
-                || physics.angerIntensity.value > 0.02 || physics.dizzyIntensity.value > 0.02
-                || wasYawning || physics.isYawning || (!isAsleep && (wasBlinking || physics.isBlinking))
-            let ticksPerRedraw = isActive ? 1 : (isAsleep ? 3 : 2) // 60, 20, or 30 FPS on a 60 Hz tick.
-            self.ticksSinceLastRedraw += 1
-            // Give small idle movements time to accumulate, but refresh at least every 100 ms.
-            if self.ticksSinceLastRedraw >= ticksPerRedraw &&
-                (isActive || self.ticksSinceLastRedraw >= 6 || view.poseNeedsDisplay()) {
-                self.ticksSinceLastRedraw = 0
-                view.needsDisplay = true
-            }
+    private func wakeToActive(immediateRedraw: Bool = false) {
+        guard isPetVisible, !screensAsleep else { return }
+        if !hiddenByFullscreen && renderCadence != .active {
+            configureRenderTimer(for: .active)
         }
+        if immediateRedraw && !hiddenByFullscreen {
+            overlayWindow?.catView.needsDisplay = true
+        }
+    }
+
+    private func configureRenderTimer(for cadence: RenderCadence) {
+        guard cadence != renderCadence || (cadence != .paused && renderTimer == nil) else { return }
+        renderTimer?.invalidate()
+        renderTimer = nil
+        renderCadence = cadence
+        guard cadence != .paused else { return }
+        let timer = Timer(timeInterval: cadence.interval, repeats: true) { [weak self] _ in
+            self?.renderTick()
+        }
+        timer.tolerance = cadence.tolerance
         RunLoop.main.add(timer, forMode: .common)
         renderTimer = timer
+    }
+
+    private let fullscreenCheckQueue = DispatchQueue(label: "com.kurocat.fullscreen-check", qos: .utility)
+    private var fullscreenCheckInFlight = false
+
+    private func updateFullscreenAutoHide(now: CFTimeInterval) -> Bool {
+        let s = CatSettings.shared
+        let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
+        if !s.autoHideFullscreen || obsBg {
+            if hiddenByFullscreen {
+                hiddenByFullscreen = false
+                overlayWindow.alphaValue = 1.0
+                lastFrameTime = now
+                overlayWindow.catView.needsDisplay = true
+            }
+            return false
+        }
+        if now - lastFullscreenCheckTime <= 0.5 || fullscreenCheckInFlight {
+            return hiddenByFullscreen
+        }
+        lastFullscreenCheckTime = now
+        fullscreenCheckInFlight = true
+        fullscreenCheckQueue.async { [weak self] in
+            let fs = Self.isOtherAppFullscreen()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.fullscreenCheckInFlight = false
+                let s = CatSettings.shared
+                let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
+                guard s.autoHideFullscreen && !obsBg else { return }
+                if fs != self.hiddenByFullscreen {
+                    self.hiddenByFullscreen = fs
+                    self.overlayWindow.alphaValue = fs ? 0.0 : 1.0
+                    if fs {
+                        self.overlayWindow.ignoresMouseEvents = true
+                    } else {
+                        self.lastFrameTime = CACurrentMediaTime()
+                        self.overlayWindow.catView.needsDisplay = true
+                    }
+                }
+            }
+        }
+        return hiddenByFullscreen
+    }
+
+    /// Returns true if any active macOS audio output device (speakers, AirPods/Bluetooth/USB headphones,
+    /// multi-output or virtual device) is currently streaming audio. Works for Apple Music, browsers
+    /// (Bilibili/YouTube/Douyin/etc.), and all local video/music players without needing an app whitelist.
+    private static func isAnyAudioOutputRunning() -> Bool {
+        func deviceHasOutputAndRunning(_ devID: AudioDeviceID) -> Bool {
+            var sSize: UInt32 = 0
+            var sAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            guard AudioObjectGetPropertyDataSize(devID, &sAddr, 0, nil, &sSize) == noErr, sSize > 0 else {
+                return false
+            }
+            let buf = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(sSize),
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { buf.deallocate() }
+            var outChannels: UInt32 = 0
+            if AudioObjectGetPropertyData(devID, &sAddr, 0, nil, &sSize, buf) == noErr {
+                let abl = UnsafeMutableAudioBufferListPointer(buf.assumingMemoryBound(to: AudioBufferList.self))
+                for b in abl { outChannels += b.mNumberChannels }
+            }
+            guard outChannels > 0 else { return false }
+
+            var running: UInt32 = 0
+            var runSize = UInt32(MemoryLayout<UInt32>.size)
+            var runAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            guard AudioObjectGetPropertyData(devID, &runAddr, 0, nil, &runSize, &running) == noErr else {
+                return false
+            }
+            return running != 0
+        }
+
+        // Enumerate all audio devices so Bluetooth/USB headphones & secondary output devices are always covered
+        var propSize: UInt32 = 0
+        var listAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &listAddr, 0, nil, &propSize) == noErr,
+           propSize >= UInt32(MemoryLayout<AudioDeviceID>.size) {
+            let count = Int(propSize) / MemoryLayout<AudioDeviceID>.size
+            var devices = [AudioDeviceID](repeating: AudioDeviceID(kAudioObjectUnknown), count: count)
+            if AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &listAddr, 0, nil, &propSize, &devices) == noErr {
+                for dev in devices where dev != kAudioObjectUnknown {
+                    if deviceHasOutputAndRunning(dev) { return true }
+                }
+                return false
+            }
+        }
+
+        // Fallback: check default output device directly
+        var devID = AudioObjectID(kAudioObjectUnknown)
+        var devSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var devAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &devAddr, 0, nil, &devSize, &devID) == noErr,
+              devID != kAudioObjectUnknown else {
+            return false
+        }
+        return deviceHasOutputAndRunning(devID)
+    }
+
+    private func pollMusicStateIfNeeded(now: CFTimeInterval) {
+        guard CatSettings.shared.autoHeadphonesOnMusic else {
+            if cachedMusicPlaying {
+                cachedMusicPlaying = false
+                musicAudioSustainedSince = 0
+                overlayWindow.catView.physics.isMusicPlaying = false
+            }
+            return
+        }
+        if now - lastMusicCheckTime < 1.0 { return }
+        lastMusicCheckTime = now
+
+        musicCheckQueue.async { [weak self] in
+            guard let self = self else { return }
+            let audioRunning = Self.isAnyAudioOutputRunning()
+            DispatchQueue.main.async {
+                let playing: Bool
+                if audioRunning {
+                    if self.musicAudioSustainedSince == 0 {
+                        self.musicAudioSustainedSince = now
+                    }
+                    // Require >= 1.5s continuous audio output to ignore brief UI/notification dings
+                    playing = (now - self.musicAudioSustainedSince) >= 1.5
+                } else {
+                    self.musicAudioSustainedSince = 0
+                    playing = false
+                }
+                self.cachedMusicPlaying = playing
+                self.overlayWindow.catView.physics.isMusicPlaying = playing
+            }
+        }
+    }
+
+    private func renderTick() {
+        guard isPetVisible, !screensAsleep else {
+            configureRenderTimer(for: .paused)
+            return
+        }
+        let now = CACurrentMediaTime()
+        if updateFullscreenAutoHide(now: now) {
+            configureRenderTimer(for: .fullscreenHidden)
+            return
+        }
+        pollMusicStateIfNeeded(now: now)
+
+        let dt = CGFloat(now - lastFrameTime)
+        lastFrameTime = now
+
+        let view = overlayWindow.catView
+        let physics = view.physics
+        let input = InputEngine.shared
+        let windowFrame = overlayWindow.frame
+        let physicsFrame = overlayWindow.physicsFrameInScreen
+        let previousMouseMoveTime = input.lastMouseMoveTime
+        let wasBlinking = physics.isBlinking
+        let wasYawning = physics.isYawning
+        let wasToastActive = view.toastActive
+        physics.step(dt: dt, windowFrameInScreen: physicsFrame)
+        view.updateHoverAndClickThrough()
+        view.tickToast(dt: dt)
+
+        let lastDirectInput = max(input.lastKeyActivityTime, input.lastMouseClickTime, lastDemoKeyTime)
+        let mouseMoving = now - input.lastMouseMoveTime < 0.12
+        let mouseStartedMoving = mouseMoving && now - previousMouseMoveTime >= 0.12
+        let mouseNearPet = mouseMoving && windowFrame.insetBy(dx: -24, dy: -24).contains(input.lastMouseLocation)
+        let isAsleep = physics.sleepiness >= 0.95
+        let hasActiveSparkles = physics.sparkles.contains { !$0.isSleepZ }
+        let hasMotion = hasActiveSparkles || !physics.floatingKeycaps.isEmpty
+            || !physics.keyGlow.isEmpty || !physics.tabletTrail.isEmpty
+            || physics.kbSparkTimer > 0.005
+            || physics.petHeadIntensity > 0.02 || physics.petBodyIntensity > 0.02
+            || physics.huntIntensity.value > 0.02
+            || physics.scruffDrag.value > 0.02 || physics.isChangingLie
+            || abs(physics.scruffSwing.value) > 0.01 || abs(physics.scruffSwingY.value) > 0.01
+            || abs(physics.scruffTailSwing.value) > 0.01
+            || (physics.douniLoafBlend.value > 0.005 && physics.douniLoafBlend.value < 0.995)
+            || abs(physics.douniLoafBlend.velocity) > 0.02
+            || abs(physics.douniLeftRaise.velocity) > 0.05 || abs(physics.douniRightRaise.velocity) > 0.05
+            || abs(physics.douniMouseBlend.velocity) > 0.05
+            || abs(physics.kbImpactY.value) > 0.01 || abs(physics.kbImpactTilt.value) > 0.01
+            || physics.angerIntensity.value > 0.02 || physics.dizzyIntensity.value > 0.02
+            || physics.scruffDizzyIntensity.value > 0.02 || physics.mousePressMiddle.value > 0.02
+            || wasYawning || physics.isYawning
+            || (!isAsleep && (wasBlinking || physics.isBlinking))
+        let isActive = now - lastDirectInput < 0.8 || !input.activeKeys.isEmpty
+            || mouseStartedMoving || mouseNearPet
+            || input.leftMouseDown || input.rightMouseDown || input.otherMouseDown
+            || view.isDraggingOrResizing || hasMotion
+            || wasToastActive || view.toastActive  // hourly toast animates at full rate
+
+        let desiredCadence: RenderCadence = isActive ? .active : (isAsleep ? .asleep : .idle)
+        if desiredCadence != renderCadence {
+            if desiredCadence == .asleep {
+                CatRenderer.purgeVolatileCaches()
+            }
+            configureRenderTimer(for: desiredCadence)
+        }
+        if isActive || view.poseNeedsDisplay() {
+            view.needsDisplay = true
+        }
     }
 
     // MARK: - Menu Bar Icon & Menu
@@ -289,17 +558,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         visItem.target = self
         menu.addItem(visItem)
 
-        let editItem = NSMenuItem(
-            title: settings.isEditMode
-                ? tr("✓ 完成调整大小与方向", "✓ Finish Resize & Direction")
-                : tr("调整大小与方向 (双击小猫)", "Resize & Direction (Double-Click)"),
-            action: #selector(toggleEditMode),
-            keyEquivalent: ""
-        )
-        editItem.target = self
-        editItem.state = settings.isEditMode ? .on : .off
-        menu.addItem(editItem)
-
         // Quick Cat Skin switcher submenu
         let coatMenu = NSMenu()
         let library = SkinLibrary.shared
@@ -325,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !library.skins.isEmpty {
             coatMenu.addItem(.separator())
             for skin in library.skins {
-                let item = NSMenuItem(title: skin.name, action: #selector(selectCustomSkin(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: library.displayName(for: skin), action: #selector(selectCustomSkin(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = skin.id
                 item.state = settings.customSkin == skin.id ? .on : .off
@@ -344,20 +602,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openDirItem.target = self
         coatMenu.addItem(openDirItem)
         if !library.skins.isEmpty {
+            coatMenu.addItem(.separator())
+            let renameMenu = NSMenu()
+            for skin in library.skins {
+                let item = NSMenuItem(title: "✏️ " + library.displayName(for: skin), action: #selector(renameCustomSkin(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = skin.id
+                renameMenu.addItem(item)
+            }
+            let renameParent = NSMenuItem(title: tr("✏️ 重命名皮肤…", "✏️ Rename Skin…"), action: nil, keyEquivalent: "")
+            renameParent.submenu = renameMenu
+            coatMenu.addItem(renameParent)
+
             let deleteMenu = NSMenu()
             for skin in library.skins {
-                let item = NSMenuItem(title: skin.name, action: #selector(deleteCustomSkin(_:)), keyEquivalent: "")
+                let delTitle = "🗑 " + library.displayName(for: skin)
+                let item = NSMenuItem(title: delTitle, action: #selector(deleteCustomSkin(_:)), keyEquivalent: "")
+                item.attributedTitle = NSAttributedString(
+                    string: delTitle,
+                    attributes: [.foregroundColor: NSColor.systemRed, .font: NSFont.menuFont(ofSize: 0)]
+                )
                 item.target = self
                 item.representedObject = skin.id
                 deleteMenu.addItem(item)
             }
-            let deleteParent = NSMenuItem(title: tr("删除皮肤", "Delete Skin"), action: nil, keyEquivalent: "")
+            let deleteTitle = tr("🗑 删除已导入皮肤…", "🗑 Delete Imported Skin…")
+            let deleteParent = NSMenuItem(title: deleteTitle, action: nil, keyEquivalent: "")
+            deleteParent.attributedTitle = NSAttributedString(
+                string: deleteTitle,
+                attributes: [.foregroundColor: NSColor.systemRed, .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)]
+            )
             deleteParent.submenu = deleteMenu
             coatMenu.addItem(deleteParent)
+
+            let batchTitle = tr("📦 批量删除皮肤…", "📦 Batch Delete Skins…")
+            let batchItem = NSMenuItem(title: batchTitle, action: #selector(openSkinManagerWindow), keyEquivalent: "")
+            batchItem.attributedTitle = NSAttributedString(
+                string: batchTitle,
+                attributes: [.foregroundColor: NSColor.systemRed, .font: NSFont.menuFont(ofSize: 0)]
+            )
+            batchItem.target = self
+            coatMenu.addItem(batchItem)
         }
         let coatParent = NSMenuItem(title: tr("猫咪皮肤 🐱", "Cat Skin 🐱"), action: nil, keyEquivalent: "")
         coatParent.submenu = coatMenu
         menu.addItem(coatParent)
+
+        let websiteItem = NSMenuItem(
+            title: tr("🌐 软件官网 (kurocat.cc)", "🌐 Website (kurocat.cc)"),
+            action: #selector(openWebsite),
+            keyEquivalent: ""
+        )
+        websiteItem.target = self
+        menu.addItem(websiteItem)
+
+        let levelKbItem = NSMenuItem(
+            title: tr("键盘水平摆放（平行屏幕）", "Level Keyboard (Parallel to Screen)"),
+            action: #selector(toggleLevelKeyboard),
+            keyEquivalent: ""
+        )
+        levelKbItem.target = self
+        levelKbItem.state = settings.levelKeyboard ? .on : .off
+        menu.addItem(levelKbItem)
 
         let settingsItem = NSMenuItem(title: tr("⚙️ 设置…", "⚙️ Settings…"), action: #selector(openSettingsWindow), keyEquivalent: ",")
         settingsItem.target = self
@@ -375,15 +681,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 updateItem.isEnabled = !isUpdating
                 menu.addItem(updateItem)
             } else {
+                let checkTitle = isCheckingUpdates
+                    ? tr("⏳ 正在检查更新...", "⏳ Checking for Updates...")
+                    : tr("检查更新 (v\(currentAppVersion))", "Check for Updates (v\(currentAppVersion))")
                 let checkItem = NSMenuItem(
-                    title: tr("检查更新 (v\(currentAppVersion))", "Check for Updates (v\(currentAppVersion))"),
+                    title: checkTitle,
                     action: #selector(manualCheckForUpdates),
                     keyEquivalent: ""
                 )
                 checkItem.target = self
+                checkItem.isEnabled = !isCheckingUpdates
                 menu.addItem(checkItem)
             }
         }
+
+        menu.addItem(.separator())
 
         let relaunchItem = NSMenuItem(title: tr("重启 KuroCat", "Restart KuroCat"), action: #selector(relaunchApp), keyEquivalent: "")
         relaunchItem.target = self
@@ -400,35 +712,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if settingsWindow == nil {
             let ctrl = SettingsWindowController()
             ctrl.onSettingsChanged = { [weak self] in
-                self?.overlayWindow.catView.needsDisplay = true
+                self?.wakeToActive(immediateRedraw: true)
                 self?.dressingRoom?.refresh()
             }
             ctrl.onScaleChanged = { [weak self] newScale in
                 self?.overlayWindow.applyScale(newScale)
+                self?.wakeToActive()
             }
             ctrl.onResetPoseAndPosition = { [weak self] in
                 self?.overlayWindow.applyScale(1.0)
                 self?.overlayWindow.resetPosition()
-                self?.overlayWindow.catView.needsDisplay = true
+                self?.wakeToActive(immediateRedraw: true)
             }
             ctrl.onOpenDressingRoom = { [weak self] in
                 self?.showDressingRoom()
+            }
+            ctrl.onOpenSkinManager = { [weak self] in
+                self?.openSkinManagerWindow()
+            }
+            ctrl.onSkinsDirectoryChanged = { [weak self] in
+                self?.overlayWindow.catView.needsDisplay = true
+                self?.dressingRoom?.refresh()
+                self?.skinManagerWindow?.refresh()
+            }
+            ctrl.onRenameSkin = { [weak self] id in
+                self?.performRenameSkin(id: id)
+            }
+            ctrl.onDeleteSkin = { [weak self] id in
+                self?.performDeleteSkin(id: id)
             }
             ctrl.onImportKeyboardSkin = { [weak self] in
                 self?.promptImportKeyboardSkin()
             }
             ctrl.onApplyWindowLevel = { [weak self] in
                 self?.overlayWindow.applyWindowLevelAndBehavior()
+                self?.dressingRoom?.syncWindowLevel()
+                self?.settingsWindow?.syncWindowLevel()
+                self?.skinManagerWindow?.syncWindowLevel()
+                self?.updatePromptController?.syncWindowLevel()
                 self?.syncWindowTopmost()
             }
             ctrl.onApplyOBSMode = { [weak self] in
                 self?.overlayWindow.applyOBSMode()
+                self?.wakeToActive(immediateRedraw: true)
             }
             ctrl.onAutoHideChanged = { [weak self] in
                 guard let self else { return }
                 if !CatSettings.shared.autoHideFullscreen && self.hiddenByFullscreen {
                     self.hiddenByFullscreen = false
                     self.overlayWindow.alphaValue = 1.0
+                    self.wakeToActive(immediateRedraw: true)
                 }
             }
             ctrl.getAutoStart = { [weak self] in
@@ -438,11 +771,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 _ = self?.setAutoStartEnabled(on)
             }
             ctrl.onLanguageChanged = { [weak self] in
-                self?.overlayWindow.catView.needsDisplay = true
+                self?.wakeToActive(immediateRedraw: true)
             }
+            releaseOnClose(ctrl.window) { [weak self] in self?.settingsWindow = nil }
             settingsWindow = ctrl
         }
         settingsWindow?.present()
+    }
+
+    private func releaseOnClose(_ window: NSWindow?, clear: @escaping () -> Void) {
+        guard let window else { return }
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { _ in
+            if let token {
+                NotificationCenter.default.removeObserver(token)
+            }
+            DispatchQueue.main.async {
+                clear()
+            }
+        }
+    }
+
+    private func purgeSkinCachesIfNeeded() {
+        if CatSettings.shared.activeSkin.renderStyle != .beagle {
+            BeagleAtlas.purgeCache()
+        }
+        CatRenderer.purgeVolatileCaches()
     }
 
     // MARK: - Actions
@@ -456,7 +814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.addButton(withTitle: "重启 KuroCat")
             alert.addButton(withTitle: "打开输入监控")
             alert.addButton(withTitle: "取消")
-            let response = alert.runModal()
+            let response = runModalAlert(alert)
             if response == .alertFirstButtonReturn {
                 relaunchApp()
                 return
@@ -466,22 +824,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         InputEngine.shared.requestPermissionsAndOpenSettings()
     }
 
+    private func updateStatusItemToolTip() {
+        guard let button = statusItem?.button else { return }
+        let en = CatSettings.shared.isEnglish
+        if isPetVisible {
+            button.toolTip = en ? "KuroCat Desktop Pet" : "KuroCat 黑猫键盘桌宠"
+        } else {
+            button.toolTip = en ? "KuroCat (Hidden — Click to Show Pet)" : "KuroCat 黑猫键盘桌宠（已隐藏 · 点击菜单「显示桌宠」唤回）"
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !isPetVisible {
+            toggleVisibility()
+        }
+        return true
+    }
+
     @objc private func toggleVisibility() {
         isPetVisible.toggle()
+        statusItem?.isVisible = true
         if isPetVisible {
+            hiddenByFullscreen = false
             lastFrameTime = CACurrentMediaTime()
-            ticksSinceLastRedraw = 0
-            overlayWindow.catView.needsDisplay = true
+            overlayWindow.applyWindowLevelAndBehavior()
             overlayWindow.orderFrontRegardless()
+            wakeToActive(immediateRedraw: true)
+            syncWindowTopmost()
         } else {
+            configureRenderTimer(for: .paused)
             overlayWindow.orderOut(nil)
         }
+        updateStatusItemToolTip()
     }
 
     @objc private func selectTabletMode(_ sender: NSMenuItem) {
         if let mode = sender.representedObject as? Int {
             CatSettings.shared.tabletMode = mode
-            overlayWindow.catView.needsDisplay = true
+            wakeToActive(immediateRedraw: true)
         }
     }
 
@@ -492,6 +872,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleFullScreenOverlay() {
         CatSettings.shared.fullScreenOverlay.toggle()
         overlayWindow.applyWindowLevelAndBehavior()
+        dressingRoom?.syncWindowLevel()
+        settingsWindow?.syncWindowLevel()
+        updatePromptController?.syncWindowLevel()
         syncWindowTopmost()
     }
 
@@ -508,6 +891,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.syncWindowTopmost()
         }
+        timer.tolerance = 0.4
         RunLoop.main.add(timer, forMode: .common)
         windowWatchdogTimer = timer
     }
@@ -517,13 +901,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func syncWindowTopmost() {
-        guard let overlayWindow, isPetVisible, !hiddenByFullscreen else { return }
+        guard let overlayWindow, isPetVisible, !hiddenByFullscreen, !screensAsleep, !isPresentingModalAlert else { return }
         let s = CatSettings.shared
         let obsBg = (s.obsCaptureMode > 0 && s.obsHideDesktop)
         if obsBg { return }
         if s.fullScreenOverlay {
             overlayWindow.orderFrontRegardless()
         }
+    }
+
+    /// Presents a modal NSAlert strictly above the overlay window (whose .popUpMenuWindow level 101
+    /// would otherwise obscure and intercept clicks on a standard .modalPanel level-8 alert).
+    @discardableResult
+    private func runModalAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        runWithOverlayYielding {
+            alert.window.level = NSWindow.Level(rawValue: max(
+                Int(CGWindowLevelForKey(.screenSaverWindow)),
+                Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2
+            ))
+            // Note: .canJoinAllSpaces and .moveToActiveSpace are mutually exclusive in AppKit
+            // and combining them throws NSInternalInconsistencyException (bypassing Swift defer).
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            NSApp.activate(ignoringOtherApps: true)
+            alert.window.orderFrontRegardless()
+            return alert.runModal()
+        }
+    }
+
+    private func runWithOverlayYielding<T>(_ body: () -> T) -> T {
+        let wasPresenting = modalAlertDepth > 0
+        modalAlertDepth += 1
+        if !wasPresenting {
+            overlayWindow?.catView.forceClickThroughForModal = true
+            let obsBg = (CatSettings.shared.obsCaptureMode > 0 && CatSettings.shared.obsHideDesktop)
+            if let overlayWindow, !obsBg {
+                overlayWindow.level = .floating
+                overlayWindow.ignoresMouseEvents = true
+            }
+        }
+        defer {
+            modalAlertDepth = max(0, modalAlertDepth - 1)
+            if modalAlertDepth == 0 {
+                overlayWindow?.catView.forceClickThroughForModal = false
+                let obsBg = (CatSettings.shared.obsCaptureMode > 0 && CatSettings.shared.obsHideDesktop)
+                if let overlayWindow, !obsBg {
+                    overlayWindow.applyWindowLevelAndBehavior()
+                    syncWindowTopmost()
+                }
+            }
+        }
+        return body()
     }
 
     // MARK: - Launch at Login (macOS LaunchAgent — works reliably for signed & ad-hoc builds)
@@ -576,26 +1003,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleKeyBadges() {
         CatSettings.shared.showKeyBadges.toggle()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleMouseBadges() {
         CatSettings.shared.showMouseBadges.toggle()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleKeyLegends() {
         CatSettings.shared.showKeyLegends.toggle()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleFootEgg() {
         CatSettings.shared.footEasterEgg.toggle()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleTailEgg() {
         CatSettings.shared.tailEasterEgg.toggle()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleKeyboardMarquee() {
         CatSettings.shared.keyboardMarquee.toggle()
+        wakeToActive(immediateRedraw: true)
+    }
+
+    @objc private func toggleLevelKeyboard() {
+        CatSettings.shared.levelKeyboard.toggle()
+        wakeToActive(immediateRedraw: true)
+        settingsWindow?.refresh()
     }
 
     @objc private func togglePetInteraction() {
@@ -609,11 +1048,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             CatSettings.shared.obsHideDesktop = false
         }
         overlayWindow.applyOBSMode()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleOBSHideDesktop() {
         CatSettings.shared.obsHideDesktop.toggle()
         overlayWindow.applyOBSMode()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func toggleAutoHideFullscreen() {
@@ -621,6 +1062,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !CatSettings.shared.autoHideFullscreen && hiddenByFullscreen {
             hiddenByFullscreen = false
             overlayWindow.alphaValue = 1.0
+            wakeToActive(immediateRedraw: true)
         }
     }
 
@@ -648,25 +1090,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
-    @objc private func toggleEditMode() {
-        CatSettings.shared.isEditMode.toggle()
-        overlayWindow.catView.needsDisplay = true
-    }
-
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
         CatSettings.shared.language = code
-        overlayWindow.catView.needsDisplay = true
+        updateStatusItemToolTip()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func selectScale(_ sender: NSMenuItem) {
         guard let num = sender.representedObject as? NSNumber else { return }
         overlayWindow.applyScale(CGFloat(num.doubleValue))
+        wakeToActive()
     }
 
     @objc private func selectCoatTheme(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let coat = CatCoatTheme(rawValue: raw) else { return }
+        CatSettings.shared.overrideSkinIris = false
         CatSettings.shared.customSkin = ""
         CatSettings.shared.coatTheme = coat
         // Auto-pair signature eye color (still freely overridable via 瞳色切换!)
@@ -680,6 +1120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .orangeWhite:
             CatSettings.shared.eyeTheme = .warmAmber
         }
+        purgeSkinCachesIfNeeded()
+        wakeToActive(immediateRedraw: true)
         dressingRoom?.refresh()
         settingsWindow?.refresh()
     }
@@ -688,6 +1130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private static let skinWorkshopURLString = "https://chanke17.github.io/KuroCat-Workshop/"
     private static let keyboardPlazaURLString = "https://chanke17.github.io/KuroCat-Workshop/#keyboards"
+    private static let websiteURLString = "https://kurocat.cc"
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
@@ -709,6 +1152,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func openWebsite() {
+        if let url = URL(string: Self.websiteURLString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func openSkinsFolder() {
         let dir = SkinLibrary.directory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -719,6 +1168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if dressingRoom == nil {
             let controller = DressingRoomWindowController()
             controller.onImport = { [weak self] url in self?.importSkin(from: url) }
+            releaseOnClose(controller.window) { [weak self] in self?.dressingRoom = nil }
             dressingRoom = controller
         }
         dressingRoom?.present()
@@ -728,13 +1178,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func importSkin(from url: URL) {
         do {
             let id = try SkinLibrary.shared.importFile(url)
+            CatSettings.shared.overrideSkinIris = false
             CatSettings.shared.customSkin = id
             let skin = SkinLibrary.shared.skin(id: id)
             var message = "已换上「\(skin?.name ?? "新皮肤")」"
             if let author = skin?.author, !author.isEmpty { message += "（作者：\(author)）" }
+            if let sk = skin, SkinLibrary.shared.skins.filter({ $0.name == sk.name }).count > 1 {
+                message += " · 存在同名皮肤，已附加短编号区分"
+            }
             dressingRoom?.setStatus("✓ " + message, kind: 1)
+            wakeToActive(immediateRedraw: true)
             dressingRoom?.refresh()
             settingsWindow?.refresh()
+            skinManagerWindow?.refresh()
         } catch {
             let reason = error.localizedDescription
             // With 换装间 open the red status line explains it in place; an alert is only for drops onto the cat.
@@ -747,37 +1203,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.messageText = "无法导入这个皮肤"
             alert.informativeText = "「\(url.lastPathComponent)」：\(reason)"
             alert.addButton(withTitle: "知道了")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
+            runModalAlert(alert)
         }
     }
 
     @objc private func selectCustomSkin(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
+        CatSettings.shared.overrideSkinIris = false
         CatSettings.shared.customSkin = id
+        purgeSkinCachesIfNeeded()
+        wakeToActive(immediateRedraw: true)
         dressingRoom?.refresh()
         settingsWindow?.refresh()
     }
 
-    @objc private func deleteCustomSkin(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let skin = SkinLibrary.shared.skin(id: id) else { return }
+    @objc private func renameCustomSkin(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        performRenameSkin(id: id)
+    }
+
+    private func performRenameSkin(id: String) {
+        guard let skin = SkinLibrary.shared.skin(id: id) else { return }
+        let en = CatSettings.shared.isEnglish
         let alert = NSAlert()
+        alert.messageText = en ? "Rename Skin" : "重命名皮肤"
+        alert.informativeText = en ? "Enter a new name for \"\(skin.name)\" (up to 40 characters):" : "为「\(skin.name)」输入新的名称（最多 40 字）："
+        alert.addButton(withTitle: en ? "Rename" : "保存")
+        alert.addButton(withTitle: en ? "Cancel" : "取消")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.stringValue = skin.name
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return }
+
+        let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if newName.isEmpty || newName == skin.name { return }
+        do {
+            let newId = try SkinLibrary.shared.rename(id: id, newName: newName)
+            if CatSettings.shared.customSkin == id {
+                CatSettings.shared.customSkin = newId
+            }
+            dressingRoom?.refresh()
+            settingsWindow?.refresh()
+            skinManagerWindow?.refresh()
+        } catch {
+            let failed = NSAlert()
+            failed.alertStyle = .warning
+            failed.messageText = en ? "Rename Failed" : "重命名失败"
+            failed.informativeText = error.localizedDescription
+            runModalAlert(failed)
+        }
+    }
+
+    @objc private func deleteCustomSkin(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        performDeleteSkin(id: id)
+    }
+
+    private func performDeleteSkin(id: String) {
+        guard let skin = SkinLibrary.shared.skin(id: id) else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
         alert.messageText = "删除皮肤「\(skin.name)」？"
         alert.informativeText = "会从皮肤文件夹里删除这个文件，删除后需要重新导入。"
-        alert.addButton(withTitle: "删除")
+        let delBtn = alert.addButton(withTitle: "🗑 删除")
+        if #available(macOS 11.0, *) { delBtn.hasDestructiveAction = true }
         alert.addButton(withTitle: "取消")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return }
         if !SkinLibrary.shared.remove(id: id) {
             let failed = NSAlert()
             failed.messageText = "删除失败"
             failed.informativeText = "无法删除 \(SkinLibrary.directory.appendingPathComponent("\(id).kurocat").path)"
-            failed.runModal()
+            runModalAlert(failed)
             return
         }
         if CatSettings.shared.customSkin == id { CatSettings.shared.customSkin = "" }
+        wakeToActive(immediateRedraw: true)
         dressingRoom?.refresh()
         settingsWindow?.refresh()
+        skinManagerWindow?.refresh()
+    }
+
+    @objc private func openSkinManagerWindow() {
+        if skinManagerWindow == nil {
+            let ctrl = SkinBatchDeleteWindowController()
+            ctrl.onBatchDelete = { [weak self] ids in
+                self?.performBatchDeleteSkins(ids: ids) ?? false
+            }
+            releaseOnClose(ctrl.window) { [weak self] in self?.skinManagerWindow = nil }
+            skinManagerWindow = ctrl
+        }
+        skinManagerWindow?.present()
+    }
+
+    @discardableResult
+    private func performBatchDeleteSkins(ids: [String]) -> Bool {
+        let targets = ids.compactMap { SkinLibrary.shared.skin(id: $0) }
+        guard !targets.isEmpty else { return false }
+        let en = CatSettings.shared.isEnglish
+        let previewNames = targets.prefix(6).map { "• " + SkinLibrary.shared.displayName(for: $0) }.joined(separator: "\n")
+        let extra = targets.count > 6
+            ? (en ? "\n...and \(targets.count - 6) more" : "\n……等共 \(targets.count) 款皮肤")
+            : ""
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = en
+            ? "Delete \(targets.count) selected skin(s)?"
+            : "确认批量删除这 \(targets.count) 款皮肤？"
+        alert.informativeText = (en
+            ? "These .kurocat files will be permanently removed from your skins folder:\n\n"
+            : "以下 .kurocat 文件会从皮肤文件夹中删除，删除后需重新导入：\n\n") + previewNames + extra
+        let delBtn = alert.addButton(withTitle: en ? "🗑 Delete \(targets.count)" : "🗑 全部删除 (\(targets.count))")
+        if #available(macOS 11.0, *) { delBtn.hasDestructiveAction = true }
+        alert.addButton(withTitle: en ? "Cancel" : "取消")
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return false }
+
+        let targetIDs = targets.map { $0.id }
+        let result = SkinLibrary.shared.removeMany(ids: targetIDs)
+        if result.removed.contains(CatSettings.shared.customSkin) {
+            CatSettings.shared.customSkin = ""
+        }
+        if !result.failed.isEmpty {
+            let failedAlert = NSAlert()
+            failedAlert.alertStyle = .warning
+            failedAlert.messageText = en ? "Some skins could not be deleted" : "部分皮肤未能删除"
+            failedAlert.informativeText = en
+                ? "Deleted \(result.removed.count), failed \(result.failed.count)."
+                : "已删除 \(result.removed.count) 款，有 \(result.failed.count) 款文件无法删除。"
+            runModalAlert(failedAlert)
+        }
+        wakeToActive(immediateRedraw: true)
+        dressingRoom?.refresh()
+        settingsWindow?.refresh()
+        skinManagerWindow?.refresh()
+        return !result.removed.isEmpty
     }
 
     @objc private func selectKeyboardTheme(_ sender: NSMenuItem) {
@@ -785,11 +1346,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let theme = KeyboardTheme(rawValue: raw) else { return }
         CatSettings.shared.customKeyboard = ""
         CatSettings.shared.keyboardTheme = theme
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func selectCustomKeyboard(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         CatSettings.shared.customKeyboard = id
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func openKeyboardPlaza() {
@@ -812,8 +1375,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedFileTypes = ["kurokb", "json"]
-        NSApp.activate(ignoringOtherApps: true)
-        if panel.runModal() == .OK, let url = panel.url {
+        let resp = runWithOverlayYielding {
+            panel.level = NSWindow.Level(rawValue: max(
+                Int(CGWindowLevelForKey(.screenSaverWindow)),
+                Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2
+            ))
+            NSApp.activate(ignoringOtherApps: true)
+            return panel.runModal()
+        }
+        if resp == .OK, let url = panel.url {
             importKeyboardSkin(from: url)
         }
     }
@@ -826,7 +1396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var message = "已换上键盘皮肤「\(kb?.name ?? "新键盘")」"
             if let author = kb?.author, !author.isEmpty { message += "（作者：\(author)）" }
             dressingRoom?.setStatus("✓ " + message, kind: 1)
-            overlayWindow.catView.needsDisplay = true
+            wakeToActive(immediateRedraw: true)
             settingsWindow?.refresh()
         } catch {
             let en = CatSettings.shared.isEnglish
@@ -835,8 +1405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.messageText = en ? "Failed to Import Keyboard Skin" : "无法导入这个键盘皮肤"
             alert.informativeText = "「\(url.lastPathComponent)」：\(error.localizedDescription)"
             alert.addButton(withTitle: en ? "OK" : "知道了")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
+            runModalAlert(alert)
         }
     }
 
@@ -847,23 +1416,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.informativeText = "会从键盘皮肤文件夹里删除这个文件，删除后需要重新导入。"
         alert.addButton(withTitle: "删除")
         alert.addButton(withTitle: "取消")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard runModalAlert(alert) == .alertFirstButtonReturn else { return }
         if !KeyboardSkinLibrary.shared.remove(id: id) {
             let failed = NSAlert()
             failed.messageText = "删除失败"
             failed.informativeText = "无法删除 \(KeyboardSkinLibrary.directory.appendingPathComponent("\(id).kurokb").path)"
-            failed.runModal()
+            runModalAlert(failed)
             return
         }
         if CatSettings.shared.customKeyboard == id { CatSettings.shared.customKeyboard = "" }
+        wakeToActive(immediateRedraw: true)
         settingsWindow?.refresh()
     }
 
     @objc private func selectEyeTheme(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let theme = EyeColorTheme(rawValue: raw) else { return }
+        CatSettings.shared.overrideSkinIris = true
         CatSettings.shared.eyeTheme = theme
+        dressingRoom?.refresh()
+        settingsWindow?.refresh()
+        wakeToActive(immediateRedraw: true)
     }
 
     @objc private func resetPosition() {
@@ -872,14 +1445,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func runDemoBurst() {
         let keys: [PhysicalKey] = [.w, .a, .s, .d, .f, .j, .o, .e, .space, .leftShift]
+        wakeToActive()
         for (idx, k) in keys.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(idx) * 0.13) { [weak self] in
                 guard let self else { return }
                 let now = CACurrentMediaTime()
                 self.lastDemoKeyTime = now
                 self.overlayWindow.catView.physics.triggerKeyDown(k, at: now)
+                self.wakeToActive()
             }
         }
+    }
+
+    @objc private func testHourlyToast() {
+        let cal = Calendar.current
+        let now = Date()
+        let hour = cal.component(.hour, from: now)
+        showHourlyToast(hour: hour)
     }
 
     @objc private func relaunchApp() {
@@ -958,45 +1540,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func checkForUpdates(manual: Bool) {
         guard AppDelegate.selfUpdateEnabled else { return }
-        fetchUpdateEndpoint(Self.updateVersionJSONURLString) { [weak self] primary in
-            guard let self else { return }
-            if let info = primary {
-                DispatchQueue.main.async { self.handleUpdateResult(info, manual: manual) }
-                return
-            }
-            self.fetchUpdateEndpoint(Self.updatePageURLString) { [weak self] fallback in
+        if isCheckingUpdates {
+            if manual { pendingManualUpdateCheck = true }
+            return
+        }
+        isCheckingUpdates = true
+        pendingManualUpdateCheck = manual
+
+        func finish(_ info: (tag: String, pageURL: URL?, assetURL: URL?)?) {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                DispatchQueue.main.async {
-                    if let info = fallback {
-                        self.handleUpdateResult(info, manual: manual)
-                    } else if manual {
-                        self.showInfoAlert(title: "检查更新失败", message: "无法连接到更新服务器，请稍后重试或检查网络连接。")
-                    }
+                let effectiveManual = manual || self.pendingManualUpdateCheck
+                self.isCheckingUpdates = false
+                self.pendingManualUpdateCheck = false
+                if let info {
+                    self.handleUpdateResult(info, manual: effectiveManual)
+                } else if effectiveManual {
+                    self.showInfoAlert(title: "检查更新失败", message: "无法连接到更新服务器，请稍后重试或检查网络连接。")
                 }
             }
         }
+
+        fetchUpdateEndpoint(Self.updateVersionJSONURLString) { [weak self] primary in
+            guard let self else { return }
+            if let info = primary {
+                finish(info)
+                return
+            }
+            self.fetchUpdateEndpoint(Self.updatePageURLString) { [weak self] fallback in
+                guard self != nil else { return }
+                finish(fallback)
+            }
+        }
+    }
+
+    private func presentNonModalUpdatePrompt(
+        title: String,
+        message: String,
+        primaryTitle: String,
+        secondaryTitle: String? = nil,
+        cancelTitle: String,
+        onPrimary: @escaping () -> Void,
+        onSecondary: (() -> Void)? = nil,
+        onCancel: @escaping () -> Void
+    ) {
+        let ctrl = updatePromptController ?? UpdatePromptWindowController()
+        if updatePromptController == nil {
+            releaseOnClose(ctrl.window) { [weak self, weak ctrl] in
+                if let ctrl, self?.updatePromptController === ctrl {
+                    self?.updatePromptController = nil
+                }
+            }
+        }
+        updatePromptController = ctrl
+        ctrl.configure(
+            title: title,
+            message: message,
+            primaryTitle: primaryTitle,
+            secondaryTitle: secondaryTitle,
+            cancelTitle: cancelTitle,
+            onPrimary: onPrimary,
+            onSecondary: onSecondary,
+            onCancel: onCancel
+        )
+        ctrl.present()
     }
 
     private func handleUpdateResult(_ info: (tag: String, pageURL: URL?, assetURL: URL?), manual: Bool) {
         if isVersion(info.tag, newerThan: currentAppVersion),
            let local = newestDownloadedCopy(), !isVersion(info.tag, newerThan: local.version) {
-            // The user already downloaded the latest version; they are just still running the old copy.
-            NSApp.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = "你已经下载了新版本 v\(local.version)"
-            alert.informativeText = "但现在运行的还是旧版 v\(currentAppVersion)：\n\(Bundle.main.bundlePath)\n\n新版本位置：\n\(local.url.path)\n\n点击「切换到新版本」会关闭旧版并打开新版。建议把新版拖进「应用程序」文件夹并删除旧版。"
-            alert.addButton(withTitle: "切换到新版本")
-            alert.addButton(withTitle: "稍后再说")
-            if alert.runModal() == .alertFirstButtonReturn {
-                switchToDownloadedCopy(local.url)
-            }
+            availableUpdateVersion = info.tag
+            availableUpdateURL = info.pageURL
+            availableAssetURL = info.assetURL
+            if !manual && CatSettings.shared.suppressAutoUpdatePrompt { return }
+            // Present non-modally above the overlay window so right-click menus and quitting remain responsive.
+            presentNonModalUpdatePrompt(
+                title: "你已经下载了新版本 v\(local.version)",
+                message: "但现在运行的还是旧版 v\(currentAppVersion)：\n\(Bundle.main.bundlePath)\n\n新版本位置：\n\(local.url.path)\n\n点击「切换到新版本」会关闭旧版并打开新版。点击「暂不更新」后续将不再自动弹窗提醒。",
+                primaryTitle: "切换到新版本",
+                cancelTitle: "暂不更新",
+                onPrimary: { [weak self] in
+                    CatSettings.shared.suppressAutoUpdatePrompt = false
+                    self?.switchToDownloadedCopy(local.url)
+                },
+                onCancel: {
+                    CatSettings.shared.suppressAutoUpdatePrompt = true
+                }
+            )
             return
         }
         if isVersion(info.tag, newerThan: currentAppVersion) {
             availableUpdateVersion = info.tag
             availableUpdateURL = info.pageURL
             availableAssetURL = info.assetURL
+            if !manual && CatSettings.shared.suppressAutoUpdatePrompt { return }
             promptUpdateAvailable(latestTag: info.tag)
         } else if manual {
             showInfoAlert(title: "已是最新版本", message: "当前版本 v\(currentAppVersion) 已是最新版本。")
@@ -1020,21 +1657,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func promptUpdateAvailable(latestTag: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "发现 KuroCat 新版本 \(latestTag)"
-        alert.informativeText = "当前版本：v\(currentAppVersion)\n最新版本：\(latestTag)\n当前运行位置：\(Bundle.main.bundlePath)\n\n点击「立即更新」将在后台自动下载安装包并重启应用。"
-        alert.addButton(withTitle: "立即更新")
-        alert.addButton(withTitle: "打开下载页")
-        alert.addButton(withTitle: "稍后再说")
-        let resp = alert.runModal()
-        if resp == .alertFirstButtonReturn {
-            performInAppUpdate()
-        } else if resp == .alertSecondButtonReturn {
-            let fallback = URL(string: Self.updatePageURLString)!
-            NSWorkspace.shared.open(availableUpdateURL ?? fallback)
-        }
+        presentNonModalUpdatePrompt(
+            title: "发现 KuroCat 新版本 \(latestTag)",
+            message: "当前版本：v\(currentAppVersion)\n最新版本：\(latestTag)\n当前运行位置：\(Bundle.main.bundlePath)\n\n点击「立即更新」将在后台自动下载安装包并重启应用。\n点击「暂不更新」后续将不再自动弹窗提醒（随时可在菜单栏点击「检查更新」）。",
+            primaryTitle: "立即更新",
+            secondaryTitle: "打开下载页",
+            cancelTitle: "暂不更新",
+            onPrimary: { [weak self] in
+                CatSettings.shared.suppressAutoUpdatePrompt = false
+                self?.performInAppUpdate()
+            },
+            onSecondary: { [weak self] in
+                let fallback = URL(string: Self.updatePageURLString)!
+                NSWorkspace.shared.open(self?.availableUpdateURL ?? fallback)
+            },
+            onCancel: {
+                CatSettings.shared.suppressAutoUpdatePrompt = true
+            }
+        )
     }
 
     private func performInAppUpdate() {
@@ -1119,6 +1759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try osa.run()
                 osa.waitUntilExit()
                 if osa.terminationStatus == 0 {
+                    InputEngine.shared.flushStats()
                     let relaunch = Process()
                     relaunch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                     relaunch.arguments = ["-n", currentAppURL.path]
@@ -1141,6 +1782,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             open -n \(dst)
         else
             mv \(dst).bak \(dst) 2>/dev/null
+            open -n \(dst) 2>/dev/null
         fi
         rm -rf \(tmp)
         """
@@ -1148,6 +1790,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments = ["-c", script]
         do {
+            InputEngine.shared.flushStats()
             try proc.run()
             NSApp.terminate(nil)
         } catch {
@@ -1158,27 +1801,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handleUpdateDownloadFailure() {
-        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "自动更新失败"
         alert.informativeText = "下载或替换安装包时出错，是否打开下载页手动下载？"
         alert.addButton(withTitle: "打开下载页")
         alert.addButton(withTitle: "取消")
-        if alert.runModal() == .alertFirstButtonReturn {
+        if runModalAlert(alert) == .alertFirstButtonReturn {
             let fallback = URL(string: Self.updatePageURLString)!
             NSWorkspace.shared.open(availableUpdateURL ?? fallback)
         }
     }
 
     private func showInfoAlert(title: String, message: String) {
-        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "好")
-        alert.runModal()
+        runModalAlert(alert)
     }
 
     // MARK: - Crisp Vector Menu Bar Cat Silhouette Icon
@@ -1211,5 +1852,201 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         img.isTemplate = true
         return img
+    }
+
+    // MARK: - Hourly Announcement
+
+    private func startHourlyAnnouncement() {
+        let calendar = Calendar.current
+        let now = Date()
+        let components = calendar.dateComponents([.second], from: now)
+        let secondsUntilNextMinute = Double(60 - (components.second ?? 0))
+        DispatchQueue.main.asyncAfter(deadline: .now() + secondsUntilNextMinute) { [weak self] in
+            guard let self else { return }
+            self.checkAndAnnounceHourly()
+            self.minuteTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                self?.checkAndAnnounceHourly()
+            }
+            RunLoop.main.add(self.minuteTimer!, forMode: .common)
+        }
+    }
+
+    private func checkAndAnnounceHourly() {
+        guard CatSettings.shared.hourlyAnnouncement else { return }
+        let cal = Calendar.current
+        let now = Date()
+        let hour = cal.component(.hour, from: now)
+        let minute = cal.component(.minute, from: now)
+        let second = cal.component(.second, from: now)
+        if minute == 0 && second < 5 && hour != lastAnnouncedHour {
+            lastAnnouncedHour = hour
+            showHourlyToast(hour: hour)
+        }
+    }
+
+    private func showHourlyToast(hour: Int) {
+        let period: String
+        let displayHour: Int
+        if hour == 0 {
+            period = "凌晨"; displayHour = 12
+        } else if hour < 6 {
+            period = "凌晨"; displayHour = hour
+        } else if hour == 12 {
+            period = "中午"; displayHour = 12
+        } else if hour < 12 {
+            period = "上午"; displayHour = hour
+        } else {
+            period = hour < 18 ? "下午" : "晚上"
+            displayHour = hour - 12
+        }
+        let text = "🕐 \(period) \(displayHour) 点整"
+        overlayWindow.catView.showToast(text: text)
+        wakeToActive(immediateRedraw: true)
+    }
+}
+
+/// Non-modal update prompt kept strictly above the overlay window so buttons stay clickable
+/// and right-click context menus / quitting remain completely responsive.
+private final class UpdatePromptWindowController: NSWindowController, NSWindowDelegate {
+    private var primaryAction: (() -> Void)?
+    private var secondaryAction: (() -> Void)?
+    private var cancelAction: (() -> Void)?
+
+    private final class FlippedContentView: NSView {
+        override var isFlipped: Bool { true }
+    }
+
+    init() {
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "KuroCat 更新提醒"
+        win.isReleasedWhenClosed = false
+        super.init(window: win)
+        win.delegate = self
+        syncWindowLevel()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func syncWindowLevel() {
+        guard let window else { return }
+        window.level = CatSettings.shared.fullScreenOverlay
+            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 2)
+            : .modalPanel
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+
+    func configure(
+        title: String,
+        message: String,
+        primaryTitle: String,
+        secondaryTitle: String?,
+        cancelTitle: String,
+        onPrimary: @escaping () -> Void,
+        onSecondary: (() -> Void)?,
+        onCancel: @escaping () -> Void
+    ) {
+        primaryAction = onPrimary
+        secondaryAction = onSecondary
+        cancelAction = onCancel
+
+        guard let window else { return }
+        let width: CGFloat = 440
+        let textX: CGFloat = 86
+        let textW: CGFloat = width - textX - 22
+
+        let content = FlippedContentView(frame: NSRect(x: 0, y: 0, width: width, height: 220))
+
+        let iconView = NSImageView(frame: NSRect(x: 20, y: 20, width: 52, height: 52))
+        iconView.image = NSApp.applicationIconImage
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        content.addSubview(iconView)
+
+        let titleField = NSTextField(wrappingLabelWithString: title)
+        titleField.font = .systemFont(ofSize: 14, weight: .bold)
+        titleField.textColor = .labelColor
+        let titleH = ceil(titleField.sizeThatFits(NSSize(width: textW, height: 200)).height)
+        titleField.frame = NSRect(x: textX, y: 20, width: textW, height: titleH)
+        content.addSubview(titleField)
+
+        let msgField = NSTextField(wrappingLabelWithString: message)
+        msgField.font = .systemFont(ofSize: 12.5)
+        msgField.textColor = .labelColor
+        msgField.isSelectable = true
+        let msgH = ceil(msgField.sizeThatFits(NSSize(width: textW, height: 600)).height)
+        msgField.frame = NSRect(x: textX, y: 20 + titleH + 8, width: textW, height: msgH)
+        content.addSubview(msgField)
+
+        let btnY = max(88, 20 + titleH + 8 + msgH + 18)
+        var rightEdge = width - 20
+
+        func addButton(title: String, keyEquivalent: String, action: Selector) {
+            let btn = NSButton(title: title, target: self, action: action)
+            btn.bezelStyle = .rounded
+            btn.keyEquivalent = keyEquivalent
+            btn.sizeToFit()
+            let bw = max(90, ceil(btn.frame.width) + 18)
+            rightEdge -= bw
+            btn.frame = NSRect(x: rightEdge, y: btnY, width: bw, height: 28)
+            content.addSubview(btn)
+            rightEdge -= 8
+        }
+
+        addButton(title: primaryTitle, keyEquivalent: "\r", action: #selector(handlePrimary))
+        if let secondaryTitle {
+            addButton(title: secondaryTitle, keyEquivalent: "", action: #selector(handleSecondary))
+        }
+        addButton(title: cancelTitle, keyEquivalent: "\u{1b}", action: #selector(handleCancel))
+
+        let totalH = btnY + 28 + 18
+        content.frame = NSRect(x: 0, y: 0, width: width, height: totalH)
+        window.contentView = content
+        window.setContentSize(NSSize(width: width, height: totalH))
+    }
+
+    func present() {
+        syncWindowLevel()
+        window?.center()
+        NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
+    }
+
+    private func clearActions() {
+        primaryAction = nil
+        secondaryAction = nil
+        cancelAction = nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        clearActions()
+    }
+
+    @objc private func handlePrimary() {
+        let action = primaryAction
+        clearActions()
+        window?.close()
+        action?()
+    }
+
+    @objc private func handleSecondary() {
+        let action = secondaryAction
+        clearActions()
+        window?.close()
+        action?()
+    }
+
+    @objc private func handleCancel() {
+        let action = cancelAction
+        clearActions()
+        window?.close()
+        action?()
     }
 }

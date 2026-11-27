@@ -45,7 +45,7 @@ int main() {
     rejects("[1,2]", "JSON 对象");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},})", "JSON");
     rejects(R"({"name":"x","palette":{"body":"#000000"}})", "formatVersion");
-    rejects(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"}})", "升级");
+    rejects(R"({"formatVersion":3,"name":"x","palette":{"body":"#000000"}})", "升级");
     rejects(R"({"formatVersion":1.5,"name":"x","palette":{"body":"#000000"}})", "整数");
     rejects(R"({"formatVersion":1,"palette":{"body":"#000000"}})", "name");
     rejects(R"({"formatVersion":1,"name":"   ","palette":{"body":"#000000"}})", "不能为空");
@@ -55,7 +55,7 @@ int main() {
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000","nose":12}})", "palette.nose");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"shape":{"bodyWidth":"fat"}})", "shape.bodyWidth");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"shape":{"build":"round"}})", "shape.build");
-    rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"regions":[{"space":"wing","fill":"#FFFFFF","anchors":[]}]})", "regions[0].space");
+    rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"regions":[{"space":123,"fill":"#FFFFFF","anchors":[]}]})", "regions[0].space");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"regions":[{"space":"body","anchors":[{"x":0,"y":0},{"x":1,"y":1}]}]})", "regions[0].fill");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"regions":[{"space":"body","fill":"#FFFFFF","anchors":[{"x":0,"y":0}]}]})", "2–128");
     rejects(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},"regions":[{"space":"body","fill":"#FFFFFF","anchors":[{"x":0},{"x":1,"y":1}]}]})", "anchors[0]");
@@ -77,9 +77,11 @@ int main() {
     CHECK(c.palette.body.sameAs(SkinColor::rgba(0x11 / 255.0, 0x22 / 255.0, 0x33 / 255.0)), "duplicate key: last wins");
     CHECK(c.palette.legs.sameAs(c.palette.body) && c.palette.tail.sameAs(c.palette.body), "legs/tail default to body");
     CHECK(c.palette.whiskers.a > 0.6 && c.palette.whiskers.r > 0.8, "dark body gets light whiskers");
-    SkinSpec light = accepts(R"({"formatVersion":1,"name":"x","palette":{"body":"#F2EEE4","points":"#35261F","stripes":"#A57543"},
-        "marks":[{"space":"tail","kind":"stroke","alpha":0.5,"points":[[50,8],[50,-8]]}]})");
+    SkinSpec light = accepts(R"({"formatVersion":1,"name":"x","palette":{"body":"#F2EEE4","points":"#35261F","stripes":"#A57543","hindLeg":"#443322","hindPaw":"#554433"},
+        "marks":[{"space":"tail","kind":"stroke","alpha":0.5,"points":[[50,8],[50,-8]]},{"space":"hindLeg","kind":"polygon","color":"#FFFFFF","points":[[10,0],[50,5],[80,-5]]},{"space":"wing","kind":"polygon","color":"#FFFFFF","points":[[10,0],[50,5],[80,-5]]}]})");
     CHECK(light.colorpoint() && light.palette.paws.sameAs(light.palette.points) && light.palette.pointsMid.set, "colour-point defaults");
+    CHECK(light.palette.hindLeg.set && light.palette.hindPaw.set, "hindLeg / hindPaw palette colours");
+    CHECK(light.marks.size() == 2 && light.marks[1].space == SkinSpace::HindLeg, "hindLeg mark parsed and unknown future space skipped");
     CHECK(light.marks[0].color.r == 0xA5 / 255.0 && light.marks[0].color.a == 0.5, "mark colour defaults to stripes, alpha multiplied");
     SkinSpec alpha = accepts(R"({"formatVersion":1,"name":"x","palette":{"body":"#000000"},
         "regions":[{"space":"leftEar","fill":"#FFFFFF80","alpha":0.5,"anchors":[{"x":-60,"y":0},{"x":60,"y":0},{"x":0,"y":-120,"inX":40,"inY":-120}]}]})");
@@ -93,6 +95,42 @@ int main() {
     // Jaw split polygon is closed around the chin
     auto jaw = skinJawSide(true, 1.0f);
     CHECK(jaw.size() == 3 + 1 + 32 + 1, "jaw polygon size");
+
+    // 1.4.5+ heterochromia, pupil, headBody, transparent mouth, extended shape & partGradients
+    SkinSpec ext = accepts(R"({"formatVersion":1,"name":"异瞳猫","palette":{"body":"#FAF5EC","headBody":"#222226","mouth":"#00000000","iris":"#E5A63B","irisLeft":"#4DA6FF","irisRight":"#F5C542","pupil":"#111111","pupilLeft":"#220033","pupilRight":"#002211"},
+        "shape":{"earSpacing":1.2,"tailRootY":-8,"armSpacing":1.15,"armLength":0.9,"armRootY":5,"hindLegRootX":-6,"hindLegRootY":4,"hindLegWidth":1.25,"hindLegReach":1.15},
+        "partGradients":{"body":{"from":"#FAF5EC","to":"#E0D4C0","angle":90,"stop":0.35},"head":{"from":"#1A1A1E","to":"#FFFFFF","stop":0.01}}})");
+    CHECK(ext.palette.headBody.set && ext.palette.irisLeft.set && ext.palette.irisRight.set, "headBody + heterochromia iris");
+    CHECK(ext.palette.pupil.set && ext.palette.pupilLeft.set && ext.palette.pupilRight.set, "pupil + heterochromia pupil");
+    CHECK(ext.palette.mouth.set && ext.palette.mouth.a < 0.01, "transparent mouth parsed for hiding");
+    CHECK(std::fabs(ext.shape.earSpacing - 1.2f) < 1e-4f && std::fabs(ext.shape.tailRootY - (-8.0f)) < 1e-4f, "earSpacing + tailRootY");
+    CHECK(std::fabs(ext.shape.armSpacing - 1.15f) < 1e-4f && std::fabs(ext.shape.armLength - 0.9f) < 1e-4f && std::fabs(ext.shape.armRootY - 5.0f) < 1e-4f, "arm shape params");
+    CHECK(std::fabs(ext.shape.hindLegRootX - (-6.0f)) < 1e-4f && std::fabs(ext.shape.hindLegRootY - 4.0f) < 1e-4f && std::fabs(ext.shape.hindLegWidth - 1.25f) < 1e-4f && std::fabs(ext.shape.hindLegReach - 1.15f) < 1e-4f, "hindLeg shape params");
+    CHECK(ext.partGradients.count("body") == 1 && ext.partGradients["body"].set && std::fabs(ext.partGradients["body"].stop - 0.35f) < 1e-4f, "partGradients.stop parsed");
+    CHECK(ext.partGradients.count("head") == 1 && std::fabs(ext.partGradients["head"].stop - 0.1f) < 1e-4f, "partGradients.stop clamped");
+
+    // formatVersion 2 + minAppVersion (workshop writes 2 when a skin needs an app newer than 1.5.2)
+    accepts(R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"}})");
+    accepts(R"({"formatVersion":1,"name":"x","minAppVersion":"9.9.9","palette":{"body":"#000000"}})"); // no app version set: not checked
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":153,"palette":{"body":"#000000"}})", "minAppVersion");
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":"1..5","palette":{"body":"#000000"}})", "minAppVersion");
+    SkinSpec::appVersion = "1.5.3";
+    accepts(R"({"formatVersion":2,"name":"x","minAppVersion":"1.5.3","palette":{"body":"#000000"}})");
+    accepts(R"({"formatVersion":2,"name":"x","minAppVersion":"1.4.10","palette":{"body":"#000000"}})");
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":"1.5.10","palette":{"body":"#000000"}})", "1.5.10");
+    rejects(R"({"formatVersion":2,"name":"x","minAppVersion":"2.0","palette":{"body":"#000000"}})", "请先升级");
+    SkinSpec::appVersion.clear();
+    CHECK(SkinSpec::compareVersions("1.4.10", "1.4.9") == 1 && SkinSpec::compareVersions("1.5", "1.5.0") == 0 && SkinSpec::compareVersions("1.5.2", "1.5.3") == -1, "compareVersions");
+    { // marks limit: 1024 since 1.5.3 (256 before)
+        auto withMarks = [](int n) {
+            std::string j = R"({"formatVersion":2,"name":"x","palette":{"body":"#000000"},"marks":[)";
+            for (int i = 0; i < n; ++i) j += std::string(i ? "," : "") + R"({"space":"head","kind":"stroke","color":"#FFFFFF","points":[[0,0],[1,1]]})";
+            return j + "]}";
+        };
+        SkinSpec many = accepts(withMarks(1024));
+        CHECK(many.marks.size() == 1024, "1024 marks accepted");
+        rejects(withMarks(1025), "1024");
+    }
 
     if (failures) { std::printf("%d check(s) failed\n", failures); return 1; }
     std::printf("PASS: .kurocat parser — templates/sample load, 28 malformed inputs rejected in Chinese, clamping/defaults/escapes/stickers OK\n");

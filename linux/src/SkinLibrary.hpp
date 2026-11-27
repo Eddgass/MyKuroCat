@@ -19,7 +19,25 @@
 struct SkinLibrary {
     std::vector<SkinSpec> skins; // sorted by name
 
-    static std::string dir() {
+    static std::string& customDir() {
+        static std::string d;
+        return d;
+    }
+
+    static std::string trimmedDir(std::string d) {
+        while (!d.empty() && (d.back() == ' ' || d.back() == '\t' || d.back() == '\r' || d.back() == '\n')) d.pop_back();
+        size_t start = 0;
+        while (start < d.size() && (d[start] == ' ' || d[start] == '\t')) ++start;
+        if (start > 0) d.erase(0, start);
+        if (d.size() >= 2 && d[0] == '~' && d[1] == '/') {
+            const char* home = std::getenv("HOME");
+            if (home && home[0]) d = std::string(home) + d.substr(1);
+        }
+        while (d.size() > 1 && d.back() == '/') d.pop_back();
+        return d;
+    }
+
+    static std::string defaultDir() {
         const char* xdg = std::getenv("XDG_DATA_HOME");
         std::string base;
         if (xdg && xdg[0] == '/') base = xdg;
@@ -28,6 +46,16 @@ struct SkinLibrary {
             base = std::string(home ? home : "/tmp") + "/.local/share";
         }
         return base + "/kurocat/skins";
+    }
+
+    static std::string dir() {
+        std::string custom = trimmedDir(customDir());
+        return custom.empty() ? defaultDir() : custom;
+    }
+
+    static bool isUsingCustomDir() {
+        std::string custom = trimmedDir(customDir());
+        return !custom.empty() && custom != defaultDir();
     }
 
     static bool ensureDir() {
@@ -94,6 +122,24 @@ struct SkinLibrary {
         bool ok = unlink((dir() + "/" + id + ".kurocat").c_str()) == 0;
         reload();
         return ok;
+    }
+
+    std::vector<std::string> removeMany(const std::vector<std::string>& ids, std::vector<std::string>* failedOut = nullptr) {
+        std::vector<std::string> removed;
+        if (failedOut) failedOut->clear();
+        for (const auto& id : ids) {
+            if (id.empty() || id.find('/') != std::string::npos || id.find("..") != std::string::npos) {
+                if (failedOut) failedOut->push_back(id);
+                continue;
+            }
+            if (unlink((dir() + "/" + id + ".kurocat").c_str()) == 0) {
+                removed.push_back(id);
+            } else if (failedOut) {
+                failedOut->push_back(id);
+            }
+        }
+        reload();
+        return removed;
     }
 };
 

@@ -420,12 +420,26 @@ enum KeyboardLayout {
         return dict
     }()
 
+    /// When true (default), keyboard sits level/parallel to the screen edge; when false, uses classic angled perspective.
+    static var levelKeyboard: Bool = true
+
     /// Screen-space keyboard quad point (su in 0..1 left-to-right, sv in 0..1 top-to-bottom).
     static func screenQuadPoint(su: CGFloat, sv: CGFloat) -> CGPoint {
-        let topLeft = CGPoint(x: 109, y: 238)
-        let topRight = CGPoint(x: 281, y: 247)
-        let bottomLeft = CGPoint(x: 103, y: 282)
-        let bottomRight = CGPoint(x: 286, y: 292)
+        let topLeft: CGPoint
+        let topRight: CGPoint
+        let bottomLeft: CGPoint
+        let bottomRight: CGPoint
+        if levelKeyboard {
+            topLeft = CGPoint(x: 109, y: 242)
+            topRight = CGPoint(x: 281, y: 242)
+            bottomLeft = CGPoint(x: 103, y: 287)
+            bottomRight = CGPoint(x: 287, y: 287)
+        } else {
+            topLeft = CGPoint(x: 109, y: 238)
+            topRight = CGPoint(x: 281, y: 247)
+            bottomLeft = CGPoint(x: 103, y: 282)
+            bottomRight = CGPoint(x: 286, y: 292)
+        }
 
         let topX = topLeft.x + (topRight.x - topLeft.x) * su
         let topY = topLeft.y + (topRight.y - topLeft.y) * su

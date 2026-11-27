@@ -265,16 +265,22 @@ struct VisualKeycap {
 
 class KeyboardLayout {
 public:
+    static bool& levelKeyboard() {
+        static bool v = true;
+        return v;
+    }
+
     static const std::vector<VisualKeycap>& keycaps() {
         static const std::vector<VisualKeycap> caps = build();
         return caps;
     }
 
     static Pt screenQuadPoint(float su, float sv) {
-        const Pt topLeft     = { 109.0f, 238.0f };
-        const Pt topRight    = { 281.0f, 247.0f };
-        const Pt bottomLeft  = { 103.0f, 282.0f };
-        const Pt bottomRight = { 286.0f, 292.0f };
+        const bool level = levelKeyboard();
+        const Pt topLeft     = level ? Pt{ 109.0f, 242.0f } : Pt{ 109.0f, 238.0f };
+        const Pt topRight    = level ? Pt{ 281.0f, 242.0f } : Pt{ 281.0f, 247.0f };
+        const Pt bottomLeft  = level ? Pt{ 103.0f, 287.0f } : Pt{ 103.0f, 282.0f };
+        const Pt bottomRight = level ? Pt{ 287.0f, 287.0f } : Pt{ 286.0f, 292.0f };
 
         float topX = topLeft.x + (topRight.x - topLeft.x) * su;
         float topY = topLeft.y + (topRight.y - topLeft.y) * su;

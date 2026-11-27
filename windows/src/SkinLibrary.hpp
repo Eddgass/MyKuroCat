@@ -17,6 +17,14 @@ inline std::wstring utf8ToWide(const std::string& s) {
     return w;
 }
 
+inline std::string wideToUtf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s((size_t)std::max(0, n), '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
 struct SkinLibrary {
     std::vector<SkinSpec> skins; // sorted by name
 
@@ -27,13 +35,34 @@ struct SkinLibrary {
         DWORD n = GetEnvironmentVariableW(L"APPDATA", env, MAX_PATH);
         return (n > 0 && n < MAX_PATH ? std::wstring(env) : std::wstring(L".")) + L"\\KuroCat";
     }
-    static std::wstring dir() { return baseDir() + L"\\skins"; }
+    static std::wstring& customDir() {
+        static std::wstring d;
+        return d;
+    }
+    static std::wstring trimmedDir(std::wstring d) {
+        while (!d.empty() && (d.back() == L' ' || d.back() == L'\t' || d.back() == L'\r' || d.back() == L'\n')) d.pop_back();
+        size_t start = 0;
+        while (start < d.size() && (d[start] == L' ' || d[start] == L'\t')) ++start;
+        if (start > 0) d.erase(0, start);
+        while (d.size() > 3 && (d.back() == L'\\' || d.back() == L'/')) d.pop_back();
+        return d;
+    }
+    static std::wstring defaultDir() { return baseDir() + L"\\skins"; }
+    static std::wstring dir() {
+        std::wstring custom = trimmedDir(customDir());
+        return custom.empty() ? defaultDir() : custom;
+    }
+    static bool isUsingCustomDir() {
+        std::wstring custom = trimmedDir(customDir());
+        return !custom.empty() && _wcsicmp(custom.c_str(), defaultDir().c_str()) != 0;
+    }
 
     static bool ensureDir() {
-        for (const std::wstring& d : {baseDir(), dir()}) {
-            if (!CreateDirectoryW(d.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
-        }
-        return true;
+        std::wstring d = dir();
+        int rc = SHCreateDirectoryExW(nullptr, d.c_str(), nullptr);
+        if (rc == ERROR_SUCCESS || rc == ERROR_ALREADY_EXISTS || rc == ERROR_FILE_EXISTS) return true;
+        DWORD attrs = GetFileAttributesW(d.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
     }
 
     static bool readFile(const std::wstring& path, std::string& bytes, std::string& error) {
@@ -79,11 +108,11 @@ struct SkinLibrary {
         if (!readFile(path, bytes, error)) return false;
         SkinSpec spec;
         if (!SkinSpec::parse(bytes, spec, error)) return false;
-        if (!ensureDir()) { error = "无法创建皮肤文件夹 %APPDATA%\\KuroCat\\skins"; return false; }
+        if (!ensureDir()) { error = "无法创建皮肤文件夹 " + wideToUtf8(dir()); return false; }
         std::wstring target = dir() + L"\\" + utf8ToWide(spec.id) + L".kurocat";
         std::wstring tmp = target + L".tmp";
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) { error = "无法写入皮肤文件夹 %APPDATA%\\KuroCat\\skins"; return false; }
+        if (h == INVALID_HANDLE_VALUE) { error = "无法写入皮肤文件夹 " + wideToUtf8(dir()); return false; }
         DWORD written = 0;
         BOOL ok = WriteFile(h, bytes.data(), (DWORD)bytes.size(), &written, nullptr) && written == bytes.size();
         ok = CloseHandle(h) && ok;
@@ -102,6 +131,146 @@ struct SkinLibrary {
         bool ok = DeleteFileW((dir() + L"\\" + utf8ToWide(id) + L".kurocat").c_str()) != FALSE;
         reload();
         return ok;
+    }
+
+    std::vector<std::string> removeMany(const std::vector<std::string>& ids, std::vector<std::string>* failedOut = nullptr) {
+        std::vector<std::string> removed;
+        if (failedOut) failedOut->clear();
+        for (const auto& id : ids) {
+            if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) {
+                if (failedOut) failedOut->push_back(id);
+                continue;
+            }
+            if (DeleteFileW((dir() + L"\\" + utf8ToWide(id) + L".kurocat").c_str()) != FALSE) {
+                removed.push_back(id);
+            } else if (failedOut) {
+                failedOut->push_back(id);
+            }
+        }
+        reload();
+        return removed;
+    }
+
+    // Disambiguates duplicate skin names with a short hash suffix so users never confuse them.
+    std::string displayName(const SkinSpec& s) const {
+        int dup = 0;
+        for (const auto& item : skins) if (item.name == s.name) ++dup;
+        if (dup > 1 && s.id.size() >= 4) return s.name + " (#" + s.id.substr(0, 4) + ")";
+        return s.name;
+    }
+
+    static std::string jsonEscapeString(const std::string& s) {
+        std::string out = "\"";
+        for (unsigned char c : s) {
+            switch (c) {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (c < 0x20) {
+                        char buf[7];
+                        std::snprintf(buf, sizeof buf, "\\u%04x", (unsigned)c);
+                        out += buf;
+                    } else {
+                        out += (char)c;
+                    }
+                    break;
+            }
+        }
+        out += '"';
+        return out;
+    }
+
+    // Replaces the top-level JSON "name" string value in-place while preserving all other fields byte-for-byte.
+    static bool replaceTopLevelName(const std::string& src, const std::string& newName, std::string& out) {
+        size_t i = 0, n = src.size();
+        if (n >= 3 && (uint8_t)src[0] == 0xEF && (uint8_t)src[1] == 0xBB && (uint8_t)src[2] == 0xBF) i = 3;
+        auto skipWs = [&]() { while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r' || src[i] == '\n')) ++i; };
+        auto skipString = [&](std::string* rawOut = nullptr) -> bool {
+            if (i >= n || src[i] != '"') return false;
+            size_t start = i++;
+            while (i < n) {
+                char c = src[i++];
+                if (c == '\\') { if (i < n) ++i; continue; }
+                if (c == '"') { if (rawOut) *rawOut = src.substr(start + 1, i - start - 2); return true; }
+            }
+            return false;
+        };
+        skipWs();
+        if (i >= n || src[i] != '{') return false;
+        ++i;
+        int depth = 1;
+        size_t valStart = std::string::npos, valEnd = std::string::npos;
+        while (i < n && depth > 0) {
+            skipWs();
+            if (i >= n) break;
+            if (depth == 1 && src[i] == '"') {
+                std::string key;
+                if (!skipString(&key)) return false;
+                skipWs();
+                if (i < n && src[i] == ':') {
+                    ++i; skipWs();
+                    if (key == "name" && i < n && src[i] == '"') {
+                        size_t s = i;
+                        if (!skipString(nullptr)) return false;
+                        valStart = s;
+                        valEnd = i;
+                    }
+                }
+                continue;
+            }
+            char c = src[i];
+            if (c == '"') { if (!skipString(nullptr)) return false; continue; }
+            if (c == '{' || c == '[') ++depth;
+            else if (c == '}' || c == ']') --depth;
+            ++i;
+        }
+        if (valStart == std::string::npos) return false;
+        out = src.substr(0, valStart) + jsonEscapeString(newName) + src.substr(valEnd);
+        return true;
+    }
+
+    bool rename(const std::string& id, const std::string& rawNewName, std::string& newIdOut, std::string& error) {
+        if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) {
+            error = "无效的皮肤 ID";
+            return false;
+        }
+        std::string cleaned = skinparse::trimmedUtf8(rawNewName, 40);
+        if (cleaned.empty()) {
+            error = "皮肤名称不能为空";
+            return false;
+        }
+        std::wstring oldPath = dir() + L"\\" + utf8ToWide(id) + L".kurocat";
+        std::string bytes;
+        if (!readFile(oldPath, bytes, error)) return false;
+        std::string updated;
+        if (!replaceTopLevelName(bytes, cleaned, updated)) {
+            error = "无法定位皮肤 JSON 中的 name 字段";
+            return false;
+        }
+        SkinSpec checkSpec;
+        if (!SkinSpec::parse(updated, checkSpec, error)) return false;
+        if (!ensureDir()) { error = "无法访问皮肤文件夹"; return false; }
+        std::wstring newPath = dir() + L"\\" + utf8ToWide(checkSpec.id) + L".kurocat";
+        std::wstring tmp = newPath + L".tmp";
+        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) { error = "无法写入皮肤文件"; return false; }
+        DWORD written = 0;
+        BOOL ok = WriteFile(h, updated.data(), (DWORD)updated.size(), &written, nullptr) && written == updated.size();
+        ok = CloseHandle(h) && ok;
+        if (!ok || !MoveFileExW(tmp.c_str(), newPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            DeleteFileW(tmp.c_str());
+            error = "保存重命名后的皮肤失败";
+            return false;
+        }
+        if (checkSpec.id != id) DeleteFileW(oldPath.c_str());
+        newIdOut = checkSpec.id;
+        reload();
+        return true;
     }
 };
 
