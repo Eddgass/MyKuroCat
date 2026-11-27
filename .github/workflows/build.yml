@@ -50,6 +50,30 @@ jobs:
       - name: Check covered eye pixels
         run: bash scripts/check-eye-closure.sh
 
+      # macOS remembers Input Monitoring permission by code signature. Signing every release with the
+      # same certificate (created once by scripts/create-macos-signing-cert.sh) keeps the permission
+      # across updates; ad-hoc builds force users to re-grant it after every update.
+      - name: Import stable signing certificate
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12_BASE64" ]; then
+            echo "::warning::MACOS_SIGN_P12_BASE64 secret is not set: this macOS build is ad-hoc signed and users must re-enable Input Monitoring after updating."
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/kurocat-sign.keychain-db"
+          KC_PW="$(uuidgen)"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/kurocat-signing.p12"
+          security import "$RUNNER_TEMP/kurocat-signing.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/kurocat-signing.p12"
+          echo "KUROCAT_SIGN_IDENTITY=KuroCat Code Signing" >> "$GITHUB_ENV"
+
       - name: Build Universal KuroCat.app (Apple Silicon + Intel)
         run: |
           chmod +x build.sh
@@ -74,33 +98,39 @@ jobs:
             arch: arm64
             tar_arch: arm64
     runs-on: ${{ matrix.runner }}
-    # Build inside Ubuntu 22.04 LTS (glibc 2.35) for wide compatibility across
-    # Ubuntu 22.04+/24.04, Debian 12+, Deepin, UnionTech UOS V23, Kylin, Arch & Fedora!
-    container:
-      image: ubuntu:22.04
+    # Build inside Debian 10 "buster" (glibc 2.28, GTK 3.24, GCC 8). The previous Ubuntu 22.04
+    # image produced binaries needing glibc 2.34+, which 统信 UOS 20 (glibc 2.28) and 银河麒麟 V10
+    # (glibc 2.31) cannot run — on Kylin that showed up as "installation always fails".
+    # The container is started with `docker run` (not `container:`) so actions/checkout's Node
+    # runtime never has to run on the old glibc.
     steps:
-      - name: Install build dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends \
-            g++ pkg-config libgtk-3-dev libcairo2-dev libx11-dev libxi-dev dpkg-dev ca-certificates git
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build KuroCat Linux binary & .deb (UOS/Debian/Ubuntu)
+      - name: Build KuroCat Linux binary, .deb and .tar.gz in Debian 10 (glibc 2.28)
         shell: bash
         run: |
-          chmod +x linux/build.sh linux/build_deb.sh
-          cd linux
-          ./build.sh
           DEB_VER="${GITHUB_REF_NAME#v}"
           if [[ ! "$DEB_VER" =~ ^[0-9]+\.[0-9]+ ]]; then DEB_VER="1.2.0"; fi
-          ./build_deb.sh "$DEB_VER"
-          tar -czf "KuroCat-Linux-${{ matrix.tar_arch }}.tar.gz" kurocat kurocat.desktop kurocat.svg
-          ls -lh "KuroCat-Linux-${{ matrix.arch }}.deb" "KuroCat-Linux-${{ matrix.tar_arch }}.tar.gz"
+          docker run --rm -v "$PWD":/src -w /src \
+            -e DEB_VER="$DEB_VER" -e TAR_ARCH="${{ matrix.tar_arch }}" -e KUROCAT_MAX_GLIBC=2.28 \
+            debian:buster bash -euo pipefail -c '
+              # buster is archived: point apt at archive.debian.org
+              sed -i -e "s|deb.debian.org|archive.debian.org|g" \
+                     -e "s|security.debian.org|archive.debian.org|g" \
+                     -e "/buster-updates/d" /etc/apt/sources.list
+              apt-get -o Acquire::Check-Valid-Until=false update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                g++ pkg-config libgtk-3-dev libcairo2-dev libx11-dev libxi-dev dpkg-dev binutils
+              cd linux
+              chmod +x build.sh build_deb.sh install.sh uninstall.sh
+              ./build.sh
+              ./build_deb.sh "$DEB_VER"
+              tar -czf "KuroCat-Linux-${TAR_ARCH}.tar.gz" \
+                kurocat kurocat.desktop kurocat.svg install.sh uninstall.sh 安装说明.txt
+            '
+          sudo chown -R "$(id -u):$(id -g)" linux
+          ls -lh "linux/KuroCat-Linux-${{ matrix.arch }}.deb" "linux/KuroCat-Linux-${{ matrix.tar_arch }}.tar.gz"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4

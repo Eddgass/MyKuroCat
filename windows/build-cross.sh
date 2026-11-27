@@ -35,6 +35,6 @@ fi
     -ffunction-sections -fdata-sections -Wl,--gc-sections \
     -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
     src/main.cpp ${EXTRA_INPUTS[@]+"${EXTRA_INPUTS[@]}"} -o KuroCat.exe \
-    -luser32 -lgdi32 -lgdiplus -lshell32 -ladvapi32
+    -luser32 -lgdi32 -lgdiplus -lshell32 -ladvapi32 -lwinhttp -lwtsapi32
 
 echo "==> Built successfully: $PWD/KuroCat.exe"

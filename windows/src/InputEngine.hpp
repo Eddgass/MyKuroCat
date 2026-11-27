@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include <deque>
 #include <functional>
@@ -37,13 +38,46 @@ public:
 
     int totalKeystrokesToday = 0;
     bool isRawInputRegistered = false;
+    HHOOK kbHook_ = nullptr;
 
     std::function<void(PhysicalKey)> onKeyDown;
     std::function<void(PhysicalKey)> onKeyUp;
     std::function<void(int, bool)> onMouseClick;
 
+    static inline InputEngine* s_hookInstance = nullptr;
+
+    static LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+        if (nCode == HC_ACTION && s_hookInstance && lParam) {
+            const KBDLLHOOKSTRUCT* kb = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+            bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+            bool isUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+            if (isDown || isUp) {
+                USHORT flags = (kb->flags & LLKHF_EXTENDED) ? RI_KEY_E0 : 0;
+                PhysicalKey key = mapRawInputKey((USHORT)kb->scanCode, flags, (USHORT)kb->vkCode);
+                if (key != PhysicalKey::None) {
+                    s_hookInstance->setRawKeyState(key, isDown);
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    void installKeyboardHook() {
+        if (kbHook_) return;
+        s_hookInstance = this;
+        kbHook_ = SetWindowsHookExW(WH_KEYBOARD_LL, lowLevelKeyboardProc, GetModuleHandleW(nullptr), 0);
+    }
+
+    void uninstallKeyboardHook() {
+        if (kbHook_) {
+            UnhookWindowsHookEx(kbHook_);
+            kbHook_ = nullptr;
+        }
+        if (s_hookInstance == this) s_hookInstance = nullptr;
+    }
+
     bool registerRawInput(HWND hwnd) {
-        RAWINPUTDEVICE rid[2] = {};
+        RAWINPUTDEVICE rid[3] = {};
         // Keyboard (Generic Desktop 0x01, Usage 0x06)
         rid[0].usUsagePage = 0x01;
         rid[0].usUsage = 0x06;
@@ -54,10 +88,94 @@ public:
         rid[1].usUsage = 0x02;
         rid[1].dwFlags = RIDEV_INPUTSINK;
         rid[1].hwndTarget = hwnd;
+        // Graphics Tablet / Pen Digitizer (Digitizer 0x0D, Usage 0x02 Pen)
+        rid[2].usUsagePage = 0x0D;
+        rid[2].usUsage = 0x02;
+        rid[2].dwFlags = RIDEV_INPUTSINK;
+        rid[2].hwndTarget = hwnd;
 
-        isRawInputRegistered = (RegisterRawInputDevices(rid, 2, sizeof(RAWINPUTDEVICE)) != FALSE);
+        isRawInputRegistered = (RegisterRawInputDevices(rid, 3, sizeof(RAWINPUTDEVICE)) != FALSE);
+        if (!isRawInputRegistered) {
+            isRawInputRegistered = (RegisterRawInputDevices(rid, 2, sizeof(RAWINPUTDEVICE)) != FALSE);
+        }
+        refreshTabletPresence(nowSeconds());
         GetCursorPos(&lastCursorPos);
         return isRawInputRegistered;
+    }
+
+    bool isTabletConnected() const {
+        if (tabletHardwareFound_) return true;
+        if (lastTabletEventTime_ > 0.0 && (nowSeconds() - lastTabletEventTime_) < 600.0) return true;
+        return false;
+    }
+
+    void refreshTabletPresence(double now) {
+        lastTabletScanTime_ = now;
+        UINT numDevices = 0;
+        if (GetRawInputDeviceList(nullptr, &numDevices, sizeof(RAWINPUTDEVICELIST)) != 0 || numDevices == 0) {
+            tabletHardwareFound_ = false;
+            return;
+        }
+        std::vector<RAWINPUTDEVICELIST> list(numDevices);
+        if (GetRawInputDeviceList(list.data(), &numDevices, sizeof(RAWINPUTDEVICELIST)) == (UINT)-1) {
+            tabletHardwareFound_ = false;
+            return;
+        }
+        auto isKnownTabletVid = [](DWORD vid) -> bool {
+            switch (vid) {
+                case 0x056A: // Wacom
+                case 0x256C: // Huion / Gaomon
+                case 0x28BD: // XP-Pen / UGEE
+                case 0x5543: // UC-Logic / UGEE
+                case 0x2FEB: // Veikk
+                case 0x2179: // Hanvon
+                case 0x33F8: // Xencelabs
+                case 0x2FBB: // Parblo
+                case 0x1B96: // N-Trig
+                    return true;
+                default: return false;
+            }
+        };
+        bool found = false;
+        for (UINT i = 0; i < numDevices; ++i) {
+            if (list[i].dwType != RIM_TYPEHID) continue;
+            RID_DEVICE_INFO info = {};
+            info.cbSize = sizeof(info);
+            UINT cb = sizeof(info);
+            if (GetRawInputDeviceInfoW(list[i].hDevice, RIDI_DEVICEINFO, &info, &cb) == (UINT)-1) continue;
+            if (isKnownTabletVid(info.hid.dwVendorId) ||
+                (info.hid.usUsagePage == 0x0D && (info.hid.usUsage == 0x01 || info.hid.usUsage == 0x02))) {
+                found = true;
+                break;
+            }
+        }
+        tabletHardwareFound_ = found;
+    }
+
+    /// Drops every held key / mouse button and re-syncs the cursor. Called after Win+L unlock,
+    /// sleep/resume and display changes: the key-up events for Win+L (and anything held while the
+    /// secure desktop was up) never reach us, so stale state would otherwise pin the cat's paws.
+    void resetAllState() {
+        std::vector<PhysicalKey> held(activeKeys.begin(), activeKeys.end());
+        rawKeys_.clear();
+        asyncKeys_.clear();
+        for (PhysicalKey k : held) recomputeUnifiedKeys(k);
+        activeKeys.clear();
+        pressedOrder.clear();
+        if (leftMouseDown) updateMouseButton(0, false);
+        if (rightMouseDown) updateMouseButton(1, false);
+        if (otherMouseDown) updateMouseButton(2, false);
+        rawDeltaAccumX = 0.0f;
+        rawDeltaAccumY = 0.0f;
+        mouseVelocity = { 0.0f, 0.0f };
+        GetCursorPos(&lastCursorPos);
+        lastRawKbTime_ = 0.0;
+        lastRawMouseTime_ = 0.0;
+    }
+
+    /// Seconds since the last keyboard WM_INPUT arrived (used to spot UIPI-blocked games).
+    double secondsSinceRawKeyboard(double now) const {
+        return lastRawKbTime_ > 0.0 ? now - lastRawKbTime_ : 1e9;
     }
 
     void handleRawInput(LPARAM lParam) {
@@ -65,12 +183,19 @@ public:
         if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size == 0) {
             return;
         }
-        std::vector<BYTE> buffer(size);
-        if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, buffer.data(), &size, sizeof(RAWINPUTHEADER)) != size) {
+        // Gaming mice can post 1000–8000 WM_INPUT/s: avoid a heap allocation per message.
+        alignas(8) BYTE stackBuf[256];
+        std::vector<BYTE> heapBuf;
+        BYTE* data = stackBuf;
+        if (size > sizeof(stackBuf)) {
+            heapBuf.resize(size);
+            data = heapBuf.data();
+        }
+        if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, data, &size, sizeof(RAWINPUTHEADER)) != size) {
             return;
         }
 
-        const RAWINPUT* raw = reinterpret_cast<const RAWINPUT*>(buffer.data());
+        const RAWINPUT* raw = reinterpret_cast<const RAWINPUT*>(data);
         if (raw->header.dwType == RIM_TYPEKEYBOARD) {
             const RAWKEYBOARD& kb = raw->data.keyboard;
             // Ignore synthetic overrun / pause prefix
@@ -79,10 +204,12 @@ public:
             if (key == PhysicalKey::None) return;
 
             bool isBreak = (kb.Flags & RI_KEY_BREAK) != 0;
-            setKeyState(key, !isBreak);
+            lastRawKbTime_ = nowSeconds();
+            setRawKeyState(key, !isBreak);
         } else if (raw->header.dwType == RIM_TYPEMOUSE) {
             const RAWMOUSE& m = raw->data.mouse;
             double now = nowSeconds();
+            lastRawMouseTime_ = now;
             if ((m.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && (m.lLastX != 0 || m.lLastY != 0)) {
                 rawDeltaAccumX += (float)m.lLastX;
                 rawDeltaAccumY += (float)m.lLastY;
@@ -95,11 +222,19 @@ public:
             if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) updateMouseButton(2, true);
             if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)   updateMouseButton(2, false);
             if (m.usButtonFlags & RI_MOUSE_WHEEL)              lastMouseMoveTime = now;
+        } else if (raw->header.dwType == RIM_TYPEHID) {
+            double now = nowSeconds();
+            lastTabletEventTime_ = now;
+            lastMouseMoveTime = now;
         }
     }
 
     /// Called at 60Hz from main loop to compute smooth cursor velocity (works in desktop & locked-cursor games!).
     void pollMouse(float dt) {
+        double now = nowSeconds();
+        if (now - lastTabletScanTime_ > 2.5) {
+            refreshTabletPresence(now);
+        }
         POINT cur = lastCursorPos;
         GetCursorPos(&cur);
         float dx = (float)(cur.x - lastCursorPos.x);
@@ -124,7 +259,8 @@ public:
             mouseVelocity.y *= 0.82f;
         }
 
-        double now = nowSeconds();
+        now = nowSeconds();
+        pollAsyncFallback(now);
         while (!recentKeyTimes_.empty() && now - recentKeyTimes_.front() > 10.0) {
             recentKeyTimes_.pop_front();
         }
@@ -136,10 +272,96 @@ public:
 
 private:
     std::deque<double> recentKeyTimes_;
+    std::unordered_set<PhysicalKey> rawKeys_;
+    std::unordered_set<PhysicalKey> asyncKeys_;
+    std::unordered_map<PhysicalKey, double> rawKeyDownTime_;
+    double lastRawKbTime_ = 0.0;
+    double lastRawMouseTime_ = 0.0;
+    bool tabletHardwareFound_ = false;
+    double lastTabletEventTime_ = 0.0;
+    double lastTabletScanTime_ = 0.0;
 
-    void setKeyState(PhysicalKey key, bool isDown) {
+    void setRawKeyState(PhysicalKey key, bool isDown) {
+        if (isDown) {
+            rawKeys_.insert(key);
+            rawKeyDownTime_[key] = nowSeconds();
+        } else {
+            rawKeys_.erase(key);
+            asyncKeys_.erase(key);
+            rawKeyDownTime_.erase(key);
+        }
+        recomputeUnifiedKeys(key);
+    }
+
+    void pollAsyncFallback(double now) {
+        struct VkEntry { int vk; PhysicalKey key; };
+        static constexpr VkEntry kTable[] = {
+            {'A', PhysicalKey::A}, {'B', PhysicalKey::B}, {'C', PhysicalKey::C}, {'D', PhysicalKey::D},
+            {'E', PhysicalKey::E}, {'F', PhysicalKey::F}, {'G', PhysicalKey::G}, {'H', PhysicalKey::H},
+            {'I', PhysicalKey::I}, {'J', PhysicalKey::J}, {'K', PhysicalKey::K}, {'L', PhysicalKey::L},
+            {'M', PhysicalKey::M}, {'N', PhysicalKey::N}, {'O', PhysicalKey::O}, {'P', PhysicalKey::P},
+            {'Q', PhysicalKey::Q}, {'R', PhysicalKey::R}, {'S', PhysicalKey::S}, {'T', PhysicalKey::T},
+            {'U', PhysicalKey::U}, {'V', PhysicalKey::V}, {'W', PhysicalKey::W}, {'X', PhysicalKey::X},
+            {'Y', PhysicalKey::Y}, {'Z', PhysicalKey::Z},
+            {'0', PhysicalKey::K0}, {'1', PhysicalKey::K1}, {'2', PhysicalKey::K2}, {'3', PhysicalKey::K3},
+            {'4', PhysicalKey::K4}, {'5', PhysicalKey::K5}, {'6', PhysicalKey::K6}, {'7', PhysicalKey::K7},
+            {'8', PhysicalKey::K8}, {'9', PhysicalKey::K9},
+            {VK_SPACE, PhysicalKey::Space}, {VK_RETURN, PhysicalKey::Enter}, {VK_BACK, PhysicalKey::Backspace},
+            {VK_TAB, PhysicalKey::Tab}, {VK_ESCAPE, PhysicalKey::Escape}, {VK_CAPITAL, PhysicalKey::CapsLock},
+            {VK_LSHIFT, PhysicalKey::LeftShift}, {VK_RSHIFT, PhysicalKey::RightShift},
+            {VK_LCONTROL, PhysicalKey::LeftControl}, {VK_RCONTROL, PhysicalKey::RightControl},
+            {VK_LMENU, PhysicalKey::LeftOption}, {VK_RMENU, PhysicalKey::RightOption},
+            {VK_LWIN, PhysicalKey::LeftCommand}, {VK_RWIN, PhysicalKey::RightCommand},
+            {VK_UP, PhysicalKey::ArrowUp}, {VK_DOWN, PhysicalKey::ArrowDown},
+            {VK_LEFT, PhysicalKey::ArrowLeft}, {VK_RIGHT, PhysicalKey::ArrowRight},
+            {VK_F1, PhysicalKey::F1}, {VK_F2, PhysicalKey::F2}, {VK_F3, PhysicalKey::F3}, {VK_F4, PhysicalKey::F4},
+            {VK_F5, PhysicalKey::F5}, {VK_F6, PhysicalKey::F6}, {VK_F7, PhysicalKey::F7}, {VK_F8, PhysicalKey::F8},
+            {VK_F9, PhysicalKey::F9}, {VK_F10, PhysicalKey::F10}, {VK_F11, PhysicalKey::F11}, {VK_F12, PhysicalKey::F12},
+            {VK_OEM_MINUS, PhysicalKey::Minus}, {VK_OEM_PLUS, PhysicalKey::Equal},
+            {VK_OEM_4, PhysicalKey::LeftBracket}, {VK_OEM_6, PhysicalKey::RightBracket},
+            {VK_OEM_5, PhysicalKey::Backslash}, {VK_OEM_1, PhysicalKey::Semicolon},
+            {VK_OEM_7, PhysicalKey::Quote}, {VK_OEM_COMMA, PhysicalKey::Comma},
+            {VK_OEM_PERIOD, PhysicalKey::Period}, {VK_OEM_2, PhysicalKey::Slash},
+            {VK_OEM_3, PhysicalKey::Grave}, {VK_DELETE, PhysicalKey::ForwardDelete}
+        };
+
+        bool rawIdle = (now - lastRawKbTime_) > 0.25;
+        for (const auto& e : kTable) {
+            bool isDown = (GetAsyncKeyState(e.vk) & 0x8000) != 0;
+            bool inRaw = rawKeys_.count(e.key) > 0;
+            bool inAsync = asyncKeys_.count(e.key) > 0;
+            bool rawStale = false;
+            if (inRaw) {
+                auto it = rawKeyDownTime_.find(e.key);
+                rawStale = rawIdle || (it == rawKeyDownTime_.end()) || ((now - it->second) > 0.25);
+            }
+            if (isDown && !inRaw && !inAsync) {
+                asyncKeys_.insert(e.key);
+                recomputeUnifiedKeys(e.key);
+            } else if (!isDown && (inAsync || rawStale)) {
+                asyncKeys_.erase(e.key);
+                if (rawStale) {
+                    rawKeys_.erase(e.key);
+                    rawKeyDownTime_.erase(e.key);
+                }
+                recomputeUnifiedKeys(e.key);
+            }
+        }
+
+        if ((now - lastRawMouseTime_) > 0.25) {
+            bool lDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            bool rDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+            bool mDown = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+            if (lDown != leftMouseDown) updateMouseButton(0, lDown);
+            if (rDown != rightMouseDown) updateMouseButton(1, rDown);
+            if (mDown != otherMouseDown) updateMouseButton(2, mDown);
+        }
+    }
+
+    void recomputeUnifiedKeys(PhysicalKey key) {
         bool wasActive = activeKeys.count(key) > 0;
-        if (isDown && !wasActive) {
+        bool isNowActive = (rawKeys_.count(key) > 0) || (asyncKeys_.count(key) > 0);
+        if (isNowActive && !wasActive) {
             activeKeys.insert(key);
             pressedOrder.erase(std::remove(pressedOrder.begin(), pressedOrder.end(), key), pressedOrder.end());
             pressedOrder.push_back(key);
@@ -148,7 +370,7 @@ private:
             recentKeyTimes_.push_back(now);
             totalKeystrokesToday++;
             if (onKeyDown) onKeyDown(key);
-        } else if (!isDown && wasActive) {
+        } else if (!isNowActive && wasActive) {
             activeKeys.erase(key);
             pressedOrder.erase(std::remove(pressedOrder.begin(), pressedOrder.end(), key), pressedOrder.end());
             if (onKeyUp) onKeyUp(key);
