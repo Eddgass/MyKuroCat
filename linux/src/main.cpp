@@ -39,6 +39,9 @@ static constexpr const char* APP_VERSION = KUROCAT_VERSION_STR;
 // Other KuroCat builds scan installed binaries for this marker (see readBinaryVersion) to find the
 // newest copy WITHOUT executing it. Always derived from KUROCAT_VERSION_STR.
 __attribute__((used)) static const char kVersionMarker[] = "KUROCAT_VERSION=" KUROCAT_VERSION_STR;
+// Self-update is switched off in this fork: upstream code is merged by hand into the local repo,
+// so the app never contacts the download host. Set to true to restore the upstream behaviour.
+static constexpr bool kSelfUpdateEnabled = false;
 static constexpr const char* UPDATE_PAGE_URL = "https://kurocat-download.app.workbuddy.host/?sharecode=JVAABIVZ7L";
 #if defined(__aarch64__) || defined(_M_ARM64)
 static constexpr const char* UPDATE_TAR_URL = "https://kurocat-download.app.workbuddy.host/downloads/KuroCat-Linux-arm64.tar.gz?sharecode=JVAABIVZ7L";
@@ -607,6 +610,7 @@ static std::string fetchUrlBody(const char* url) {
 static void startInAppUpdate();
 
 static void startAsyncUpdateCheck(bool manual, int delayMs = 0) {
+    if (!kSelfUpdateEnabled) return;
     std::thread([manual, delayMs]() {
         if (delayMs > 0) usleep((useconds_t)delayMs * 1000);
         auto* res = new LinuxUpdateResult();
@@ -692,6 +696,7 @@ static void writeUserDesktopEntry(const std::string& exePath) {
 }
 
 static void startInAppUpdate() {
+    if (!kSelfUpdateEnabled) return;
     if (!g_app || g_app->isUpdating) return;
     g_app->isUpdating = true;
 
@@ -1824,25 +1829,27 @@ static void showPopupMenu(LinuxApp& app, GdkEventButton* evt) {
         showSettingsWindow();
     }));
 
-    addSep();
-    if (!app.availableUpdateVersion.empty()) {
-        std::string lbl = app.isUpdating
-            ? (std::string(tr("⏳ 正在下载更新 ", "⏳ Downloading update ")) + app.availableUpdateVersion + "...")
-            : (std::string(tr("🆕 发现新版本 ", "🆕 Update Available ")) + app.availableUpdateVersion);
-        if (app.isUpdating) {
-            GtkWidget* item = gtk_menu_item_new_with_label(lbl.c_str());
-            gtk_widget_set_sensitive(item, FALSE);
-            gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    if (kSelfUpdateEnabled) {
+        addSep();
+        if (!app.availableUpdateVersion.empty()) {
+            std::string lbl = app.isUpdating
+                ? (std::string(tr("⏳ 正在下载更新 ", "⏳ Downloading update ")) + app.availableUpdateVersion + "...")
+                : (std::string(tr("🆕 发现新版本 ", "🆕 Update Available ")) + app.availableUpdateVersion);
+            if (app.isUpdating) {
+                GtkWidget* item = gtk_menu_item_new_with_label(lbl.c_str());
+                gtk_widget_set_sensitive(item, FALSE);
+                gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+            } else {
+                addAction(lbl.c_str(), G_CALLBACK(+[](GtkMenuItem*, gpointer) {
+                    startInAppUpdate();
+                }));
+            }
         } else {
+            std::string lbl = std::string(tr("检查更新 (当前 v", "Check for Updates (v")) + APP_VERSION + ")";
             addAction(lbl.c_str(), G_CALLBACK(+[](GtkMenuItem*, gpointer) {
-                startInAppUpdate();
+                startAsyncUpdateCheck(true, 0);
             }));
         }
-    } else {
-        std::string lbl = std::string(tr("检查更新 (当前 v", "Check for Updates (v")) + APP_VERSION + ")";
-        addAction(lbl.c_str(), G_CALLBACK(+[](GtkMenuItem*, gpointer) {
-            startAsyncUpdateCheck(true, 0);
-        }));
     }
     addSep();
     addAction(tr("退出 KuroCat", "Quit KuroCat"), G_CALLBACK(+[](GtkMenuItem*, gpointer) {

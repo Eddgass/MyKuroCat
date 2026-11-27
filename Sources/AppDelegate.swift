@@ -363,24 +363,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        menu.addItem(.separator())
+        if AppDelegate.selfUpdateEnabled {
+            menu.addItem(.separator())
 
-        if let ver = availableUpdateVersion {
-            let title = isUpdating
-                ? tr("⏳ 正在下载更新 \(ver)...", "⏳ Downloading update \(ver)...")
-                : tr("🆕 发现新版本 \(ver) — 点击自动更新", "🆕 Update Available \(ver) — Click to Update")
-            let updateItem = NSMenuItem(title: title, action: #selector(openUpdateDownload), keyEquivalent: "")
-            updateItem.target = self
-            updateItem.isEnabled = !isUpdating
-            menu.addItem(updateItem)
-        } else {
-            let checkItem = NSMenuItem(
-                title: tr("检查更新 (v\(currentAppVersion))", "Check for Updates (v\(currentAppVersion))"),
-                action: #selector(manualCheckForUpdates),
-                keyEquivalent: ""
-            )
-            checkItem.target = self
-            menu.addItem(checkItem)
+            if let ver = availableUpdateVersion {
+                let title = isUpdating
+                    ? tr("⏳ 正在下载更新 \(ver)...", "⏳ Downloading update \(ver)...")
+                    : tr("🆕 发现新版本 \(ver) — 点击自动更新", "🆕 Update Available \(ver) — Click to Update")
+                let updateItem = NSMenuItem(title: title, action: #selector(openUpdateDownload), keyEquivalent: "")
+                updateItem.target = self
+                updateItem.isEnabled = !isUpdating
+                menu.addItem(updateItem)
+            } else {
+                let checkItem = NSMenuItem(
+                    title: tr("检查更新 (v\(currentAppVersion))", "Check for Updates (v\(currentAppVersion))"),
+                    action: #selector(manualCheckForUpdates),
+                    keyEquivalent: ""
+                )
+                checkItem.target = self
+                menu.addItem(checkItem)
+            }
         }
 
         let relaunchItem = NSMenuItem(title: tr("重启 KuroCat", "Restart KuroCat"), action: #selector(relaunchApp), keyEquivalent: "")
@@ -897,6 +899,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Auto Update Checker & In-App Self-Updater
 
+    // Self-update is switched off in this fork: upstream code is merged by hand into the local repo,
+    // so the app never contacts the download host. Set to true to restore the upstream behaviour.
+    private static let selfUpdateEnabled = false
     private static let updatePageURLString = "https://kurocat-download.app.workbuddy.host/?sharecode=JVAABIVZ7L"
     private static let updateVersionJSONURLString = "https://kurocat-download.app.workbuddy.host/version.json?sharecode=JVAABIVZ7L"
     private static let defaultMacAssetURLString = "https://kurocat-download.app.workbuddy.host/downloads/KuroCat-macOS-universal.zip?sharecode=JVAABIVZ7L"
@@ -952,6 +957,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func checkForUpdates(manual: Bool) {
+        guard AppDelegate.selfUpdateEnabled else { return }
         fetchUpdateEndpoint(Self.updateVersionJSONURLString) { [weak self] primary in
             guard let self else { return }
             if let info = primary {
@@ -1032,6 +1038,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func performInAppUpdate() {
+        guard AppDelegate.selfUpdateEnabled else { return }
         guard !isUpdating else { return }
         guard let assetURL = availableAssetURL ?? URL(string: Self.defaultMacAssetURLString) else { return }
         isUpdating = true
