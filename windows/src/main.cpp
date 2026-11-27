@@ -57,6 +57,9 @@ constexpr const wchar_t* VERSION_PROP = L"KuroCatVersion"; // set on the tray ow
 constexpr const wchar_t* TRAY_OWNER_CLASS = L"KuroCatTrayOwnerClass";
 constexpr const wchar_t* OVERLAY_CLASS = L"KuroCatOverlayWindowClass";
 constexpr double FRAME_INTERVAL = 1.0 / 60.0;
+// Self-update is switched off in this fork: upstream code is merged by hand into the local repo,
+// so the app never contacts the download host. Set to true to restore the upstream behaviour.
+constexpr bool kSelfUpdateEnabled = false;
 constexpr const wchar_t* UPDATE_PAGE_URL = L"https://kurocat-download.app.workbuddy.host/?sharecode=JVAABIVZ7L";
 constexpr const wchar_t* UPDATE_WIN_EXE_PATH = L"/downloads/KuroCat-Windows-x64.exe?sharecode=JVAABIVZ7L";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
@@ -619,6 +622,7 @@ DWORD WINAPI updateCheckThreadProc(LPVOID param) {
 }
 
 void startAsyncUpdateCheck(HWND notifyHwnd, bool manual, int delayMs = 0) {
+    if (!kSelfUpdateEnabled) return;
     auto* params = new UpdateCheckThreadParams{ notifyHwnd, manual, delayMs };
     HANDLE hThread = CreateThread(nullptr, 0, updateCheckThreadProc, params, 0, nullptr);
     if (hThread) {
@@ -750,6 +754,7 @@ DWORD WINAPI updateDownloadThreadProc(LPVOID param) {
 }
 
 void startInAppUpdate(AppState& app) {
+    if (!kSelfUpdateEnabled) return;
     if (app.isUpdating || !app.menuOwnerHwnd) return;
     app.isUpdating = true;
     HANDLE hThread = CreateThread(nullptr, 0, updateDownloadThreadProc, app.menuOwnerHwnd, 0, nullptr);
@@ -2048,15 +2053,17 @@ void showContextMenu(AppState& app, POINT screenPt) {
     // Unified Settings window
     AppendMenuW(menu, MF_STRING, CMD_OPEN_SETTINGS, tr(L"\u2699\uFE0F \u8BBE\u7F6E\u2026", L"\u2699\uFE0F Settings..."));
 
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    if (!app.availableUpdateVersion.empty()) {
-        std::wstring upTxt = app.isUpdating
-            ? (std::wstring(tr(L"\u23F3 \u6B63\u5728\u4E0B\u8F7D\u66F4\u65B0 ", L"\u23F3 Downloading update ")) + app.availableUpdateVersion + L"...")
-            : (std::wstring(tr(L"\U0001F195 \u53D1\u73B0\u65B0\u7248\u672C ", L"\U0001F195 Update Available ")) + app.availableUpdateVersion);
-        AppendMenuW(menu, MF_STRING | (app.isUpdating ? MF_GRAYED : 0), CMD_OPEN_UPDATE, upTxt.c_str());
-    } else {
-        std::wstring chkTxt = std::wstring(tr(L"\u68C0\u67E5\u66F4\u65B0 (\u5F53\u524D v", L"Check for Updates (v")) + APP_VERSION + L")";
-        AppendMenuW(menu, MF_STRING, CMD_CHECK_UPDATE, chkTxt.c_str());
+    if (kSelfUpdateEnabled) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        if (!app.availableUpdateVersion.empty()) {
+            std::wstring upTxt = app.isUpdating
+                ? (std::wstring(tr(L"\u23F3 \u6B63\u5728\u4E0B\u8F7D\u66F4\u65B0 ", L"\u23F3 Downloading update ")) + app.availableUpdateVersion + L"...")
+                : (std::wstring(tr(L"\U0001F195 \u53D1\u73B0\u65B0\u7248\u672C ", L"\U0001F195 Update Available ")) + app.availableUpdateVersion);
+            AppendMenuW(menu, MF_STRING | (app.isUpdating ? MF_GRAYED : 0), CMD_OPEN_UPDATE, upTxt.c_str());
+        } else {
+            std::wstring chkTxt = std::wstring(tr(L"\u68C0\u67E5\u66F4\u65B0 (\u5F53\u524D v", L"Check for Updates (v")) + APP_VERSION + L")";
+            AppendMenuW(menu, MF_STRING, CMD_CHECK_UPDATE, chkTxt.c_str());
+        }
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, CMD_QUIT, tr(L"\u9000\u51FA KuroCat", L"Quit KuroCat"));

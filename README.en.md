@@ -142,7 +142,7 @@ KuroCat/
 
 ## 🔒 Privacy
 
-All keyboard and mouse hardware signals in KuroCat are processed **strictly in local memory in real time** to drive animations and counters—**no keystrokes are ever logged or saved**. Aside from checking the official release endpoint for new versions on startup or when manually clicking "Check for Updates", KuroCat makes no network requests. The entire codebase is open source and auditable.
+All keyboard and mouse hardware signals in KuroCat are processed **strictly in local memory in real time** to drive animations and counters—**no keystrokes are ever logged or saved**. This fork disables self-update (`kSelfUpdateEnabled = false`), so **it makes no network requests at all** while running. The entire codebase is open source and auditable.
 
 ## 📄 License
 
